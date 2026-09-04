@@ -94,7 +94,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
       )
     : exchangeClock;
 
-  const providers = buildProviders(config, marketClock, faults);
+  const providers = buildProviders(config, marketClock, faults, clock);
 
   const registry = new ProviderRegistry(providers, {
     breaker: config.breaker,
@@ -206,6 +206,7 @@ function buildProviders(
   config: Config,
   marketClock: MarketClock,
   faults: FaultState,
+  clock: Clock,
 ): MarketDataProvider[] {
   const providers: MarketDataProvider[] = [];
 
@@ -220,6 +221,7 @@ function buildProviders(
             name: 'synthetic',
             seed: config.providers.syntheticSeed,
             clock: marketClock,
+            now: clock,
             faults,
           }),
         );
@@ -242,6 +244,7 @@ function buildProviders(
             sourceLabel: 'synthetic-alt',
             seed: config.providers.syntheticSeed,
             clock: marketClock,
+            now: clock,
             faults,
             bias: 1.0004,
           }),

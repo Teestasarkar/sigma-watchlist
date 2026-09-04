@@ -37,6 +37,8 @@
 
 import type { Bar, RawQuote } from '../domain/types.js';
 import type { SimulatedMarketClock } from '../domain/marketClock.js';
+import type { Clock } from '../infra/clock.js';
+import { systemClock } from '../infra/clock.js';
 import { TRADING_DAYS_PER_YEAR } from '../domain/stats.js';
 import { normalAt, uniformAt } from './random.js';
 import { findEntry, type UniverseEntry } from './universe.js';
@@ -82,6 +84,13 @@ export interface SyntheticOptions {
   name?: string;
   seed: number;
   clock: SimulatedMarketClock;
+  /**
+   * Wall clock. Injected rather than read from `Date.now()` so a test can
+   * advance three sessions instantly. Without it the provider keeps answering
+   * from real time while everything around it has moved on - untestable, and
+   * a latent bug anywhere the app runs on a shifted clock.
+   */
+  now?: Clock;
   faults: FaultState;
   /**
    * Systematic price offset for this provider instance.
@@ -107,6 +116,7 @@ export class SyntheticProvider implements MarketDataProvider {
 
   private readonly seed: number;
   private readonly clock: SimulatedMarketClock;
+  private readonly wall: Clock;
   private readonly faults: FaultState;
   private readonly bias: number;
   private readonly sourceLabel: string;
@@ -124,6 +134,7 @@ export class SyntheticProvider implements MarketDataProvider {
     this.name = opts.name ?? 'synthetic';
     this.seed = opts.seed;
     this.clock = opts.clock;
+    this.wall = opts.now ?? systemClock;
     this.faults = opts.faults;
     this.bias = opts.bias ?? 1;
     this.sourceLabel = opts.sourceLabel ?? this.name;
@@ -214,11 +225,19 @@ export class SyntheticProvider implements MarketDataProvider {
     return p;
   }
 
-  /** Session close, with any injected shock applied. */
+  /**
+   * Close of a completed session.
+   *
+   * Deliberately *not* shocked. An injected shock is an event happening now;
+   * applying it to historical closes would rewrite the past, which both
+   * corrupts every volatility estimate derived from those bars and - worse -
+   * moves the previous close by the same amount as the current price, so the
+   * session return stays flat and no signal fires at all.
+   */
   private closeAt(symbol: string, index: number): number {
     if (index < 0) return this.entry(symbol).basePrice;
     const p = this.path(symbol, index);
-    return (p.closes[index] as number) * this.shockFactor(symbol, Number.POSITIVE_INFINITY);
+    return p.closes[index] as number;
   }
 
   /**
@@ -275,10 +294,11 @@ export class SyntheticProvider implements MarketDataProvider {
     const logPrice =
       Math.log(open) + (dayReturn - gap) * f + this.wiggle(symbol, index, f, scale);
 
-    const shock = this.shockFactor(symbol, ts);
+    // The shock applies to the live price only. The session's open already
+    // happened, and the previous close is history.
     return {
-      price: Math.max(0.5, Math.exp(logPrice)) * shock,
-      open: open * shock,
+      price: Math.max(0.5, Math.exp(logPrice)) * this.shockFactor(symbol, ts),
+      open,
       prevClose,
     };
   }
@@ -344,7 +364,7 @@ export class SyntheticProvider implements MarketDataProvider {
 
   async getQuote(symbol: string, signal?: AbortSignal): Promise<RawQuote> {
     const sym = symbol.toUpperCase();
-    const now = Date.now();
+    const now = this.wall.now();
 
     // Seeded on a coarse time bucket so repeated calls within the same instant
     // agree, but the failure pattern still varies over time.
@@ -372,7 +392,7 @@ export class SyntheticProvider implements MarketDataProvider {
 
   async getHistory(symbol: string, sessions: number, signal?: AbortSignal): Promise<Bar[]> {
     const sym = symbol.toUpperCase();
-    const now = Date.now();
+    const now = this.wall.now();
     await this.applyTransportFaults(sym, Math.floor(now / 250));
     signal?.throwIfAborted();
 

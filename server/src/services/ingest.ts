@@ -181,6 +181,22 @@ export class IngestService {
 
     result.quoteAccepted = await this.market.upsertQuote(quote);
 
+    /*
+     * A symbol that starts resolving again must be un-marked.
+     *
+     * `markStatus('delisted')` above is sticky, and nothing else clears it -
+     * so a transient period where every provider disowned a ticker would leave
+     * it permanently flagged as gone even after it came back. The flag is a
+     * statement about the present, not a tombstone.
+     */
+    if (result.quoteAccepted) {
+      const instrument = await this.market.getInstrument(symbol);
+      if (instrument && instrument.status !== 'active') {
+        await this.market.markStatus(symbol, 'active');
+        log.info('symbol resolving again', { symbol, was: instrument.status });
+      }
+    }
+
     // Backfill before detection, so detection sees complete history.
     result.barsWritten = await this.backfillIfNeeded(symbol, now);
 

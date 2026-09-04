@@ -215,20 +215,47 @@ export class TimeoutError extends Error {
   }
 }
 
-/** Race a promise against a timeout, aborting the underlying request. */
+/**
+ * Bound how long an operation may take, and cancel it when it overruns.
+ *
+ * The deadline is a genuine race, not merely an abort. Aborting the signal and
+ * then awaiting `fn` assumes `fn` honours the signal - and a provider that
+ * quietly ignores it would hang forever, which is exactly the failure a
+ * timeout exists to prevent. Racing releases the caller on schedule whatever
+ * the callee does; the abort is the cooperative half, so a well-behaved callee
+ * also stops working rather than finishing into the void.
+ */
 export async function withTimeout<T>(
   ms: number,
   fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(new TimeoutError(ms)), ms);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ac.abort(new TimeoutError(ms));
+      reject(new TimeoutError(ms));
+    }, ms);
+  });
+
+  // Start eagerly, so a synchronous throw inside `fn` becomes a rejection.
+  const work = (async () => fn(ac.signal))();
+
+  // When the deadline wins, `work` may still reject later with an abort error
+  // that nobody is awaiting. Swallow it so it cannot surface as an unhandled
+  // rejection and take the process down.
+  void work.catch(() => undefined);
+
   try {
-    return await fn(ac.signal);
+    return await Promise.race([work, deadline]);
   } catch (err) {
-    if (ac.signal.aborted) throw new TimeoutError(ms);
+    // Normalise: a callee that rejects *because* we aborted it should report
+    // the timeout, not an opaque AbortError.
+    if (ac.signal.aborted && !(err instanceof TimeoutError)) throw new TimeoutError(ms);
     throw err;
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
