@@ -267,10 +267,11 @@ export const api = {
         body: {},
         idempotent: false,
       }),
-    rewind: (minutes: number) =>
-      request<{ rewoundTo: number; symbols: number }>('/api/dev/rewind', {
+    /** Rewind the checkpoint by N *trading sessions*, not minutes. */
+    rewind: (sessions: number) =>
+      request<{ rewoundTo: number; sessions: number; symbols: number }>('/api/dev/rewind', {
         method: 'POST',
-        body: { minutes, handle: 'demo' },
+        body: { sessions, handle: 'demo' },
         idempotent: false,
       }),
   },

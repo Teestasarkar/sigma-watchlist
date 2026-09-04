@@ -134,10 +134,19 @@ export const config = {
     maxItems: num(process.env.DIGEST_MAX_ITEMS, 12),
     /** No single symbol may occupy more than this many slots. */
     maxPerSymbol: num(process.env.DIGEST_MAX_PER_SYMBOL, 2),
-    /** If a user has never checked in, look back this far on first visit. */
-    firstVisitLookbackMs: num(process.env.DIGEST_FIRST_LOOKBACK_MS, 3 * 24 * 3600_000),
-    /** Hard ceiling on the lookback window, so a 3-month absence isn't a firehose. */
-    maxLookbackMs: num(process.env.DIGEST_MAX_LOOKBACK_MS, 14 * 24 * 3600_000),
+    /**
+     * Lookback windows, in *trading sessions* rather than milliseconds.
+     *
+     * Sessions are the only unit that means the same thing to a live exchange
+     * and to the compressed simulator clock. Expressed in wall-clock time, a
+     * window that is a sensible three days against a real feed becomes a third
+     * of a trading year against the simulator - and every significance figure
+     * then divides by the square root of a hundred-odd sessions and reports a
+     * real move as noise. See MarketClock.sessionsAgo.
+     */
+    firstVisitLookbackSessions: num(process.env.DIGEST_FIRST_LOOKBACK_SESSIONS, 3),
+    /** Hard ceiling, so returning after three months is not a firehose. */
+    maxLookbackSessions: num(process.env.DIGEST_MAX_LOOKBACK_SESSIONS, 10),
   },
 
   limits: {

@@ -272,7 +272,17 @@ export async function registerOpsRoutes(fastify: FastifyInstance, app: App): Pro
     const body = z
       .object({
         handle: z.string().default('demo'),
-        minutes: z.number().min(1).max(60 * 24 * 30).default(30),
+        /**
+         * Sessions, not minutes.
+         *
+         * Minutes were the original interface and they were misleading: on the
+         * compressed simulator clock, "rewind 90 minutes" is a hundred and
+         * twenty trading sessions - half a year - so the briefing filled with
+         * months of history and every move divided by sqrt(120) and read as
+         * noise. Sessions are the unit the product reasons in, so they are the
+         * unit the control should offer.
+         */
+        sessions: z.number().min(0.25).max(60).default(3),
       })
       .safeParse(req.body ?? {});
     if (!body.success) throw badRequest('invalid rewind request');
@@ -281,17 +291,37 @@ export async function registerOpsRoutes(fastify: FastifyInstance, app: App): Pro
     if (!user) throw badRequest(`no such user: ${body.data.handle}`);
 
     const symbols = await app.users.listUserSymbols(user.id);
-    const at = app.clock.now() - body.data.minutes * 60_000;
+    const at = app.marketClock.sessionsAgo(app.clock.now(), body.data.sessions);
+
+    /*
+     * Recover the price as it *was* at the rewound instant, not the price now.
+     *
+     * A checkpoint records what the user actually saw, so simulating "you last
+     * looked three sessions ago" has to reach back for the close of that
+     * session. Storing the current price instead would leave every "since you
+     * looked" figure at exactly 0.00% - technically consistent, and a
+     * completely useless demo.
+     */
     const quotes = await app.market.getQuotes(symbols);
+    const entries = await Promise.all(
+      symbols.map(async (symbol) => {
+        const bars = await app.market.getBars(symbol, 400);
+        // The last bar at or before the rewind target.
+        let price: number | null = null;
+        for (const bar of bars) {
+          if (bar.ts <= at) price = bar.close;
+          else break;
+        }
+        // No bar that old (a freshly added symbol): fall back to the current
+        // price, which correctly yields a zero delta rather than a fabricated one.
+        return { symbol, price: price ?? quotes.get(symbol)?.price ?? null };
+      }),
+    );
 
     // rewindMarks, not advanceMarks: the latter refuses to move a checkpoint
     // backwards, which is exactly the invariant we need to bypass here.
-    const moved = await app.users.rewindMarks(
-      user.id,
-      symbols.map((symbol) => ({ symbol, price: quotes.get(symbol)?.price ?? null })),
-      at,
-    );
+    const moved = await app.users.rewindMarks(user.id, entries, at);
 
-    return { rewoundTo: at, symbols: symbols.length, moved };
+    return { rewoundTo: at, sessions: body.data.sessions, symbols: symbols.length, moved };
   });
 }

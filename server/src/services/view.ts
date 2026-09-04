@@ -47,8 +47,9 @@ export interface ViewOptions {
   digest: {
     maxItems: number;
     maxPerSymbol: number;
-    firstVisitLookbackMs: number;
-    maxLookbackMs: number;
+    /** Lookback windows in trading sessions - see MarketClock.sessionsAgo. */
+    firstVisitLookbackSessions: number;
+    maxLookbackSessions: number;
   };
   recencyHalfLifeMs: number;
   minBarsForStats: number;
@@ -119,9 +120,20 @@ export class ViewService {
 
     const snap = await this.snapshot(userId, symbols);
 
-    // Per-symbol cutoffs, and the earliest of them for the SQL query.
-    const firstVisitCutoff = now - this.opts.digest.firstVisitLookbackMs;
-    const hardFloor = now - this.opts.digest.maxLookbackMs;
+    /*
+     * Per-symbol cutoffs, and the earliest of them for the SQL query.
+     *
+     * Both are computed in *sessions* via the market clock, not in wall-clock
+     * milliseconds. Against the compressed simulator clock a "three day"
+     * window would otherwise span a third of a trading year, and dividing a
+     * move by the square root of that many sessions reports genuine news as
+     * noise.
+     */
+    const firstVisitCutoff = this.clock.sessionsAgo(
+      now,
+      this.opts.digest.firstVisitLookbackSessions,
+    );
+    const hardFloor = this.clock.sessionsAgo(now, this.opts.digest.maxLookbackSessions);
 
     const cutoffs = new Map<string, number>();
     let earliest = now;
@@ -348,7 +360,7 @@ export class ViewService {
     symbols: readonly string[],
     now: number,
   ): Promise<Map<string, Signal>> {
-    const since = now - this.opts.digest.maxLookbackMs;
+    const since = this.clock.sessionsAgo(now, this.opts.digest.maxLookbackSessions);
     const all = await this.signals.getSignalsSince(symbols, since);
     const best = new Map<string, Signal>();
     for (const s of all) {

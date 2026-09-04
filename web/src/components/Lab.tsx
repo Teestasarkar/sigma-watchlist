@@ -118,19 +118,26 @@ export function Lab({ onChanged }: Props): React.JSX.Element {
           <h4>Come back later</h4>
           <p>
             Rewinds your checkpoint so the briefing covers a longer window — the same thing that
-            happens when you actually walk away and return.
+            happens when you walk away and come back. Measured in <em>trading sessions</em>,
+            because that is the unit significance is measured in: a move gets{' '}
+            <span className="num">√n</span> more room to be unremarkable over{' '}
+            <span className="num">n</span> sessions.
           </p>
           <div className="lab-row">
-            {[15, 60, 240].map((m) => (
+            {[1, 3, 10].map((n) => (
               <button
-                key={m}
+                key={n}
                 className="btn btn-sm"
                 disabled={busy !== null}
                 onClick={() =>
-                  void run(`rewind${m}`, () => api.dev.rewind(m), `Checkpoint moved back ${m} minutes.`)
+                  void run(
+                    `rewind${n}`,
+                    () => api.dev.rewind(n),
+                    `Checkpoint moved back ${n} session${n === 1 ? '' : 's'}.`,
+                  )
                 }
               >
-                −{m < 60 ? `${m}m` : `${m / 60}h`}
+                −{n} session{n === 1 ? '' : 's'}
               </button>
             ))}
           </div>

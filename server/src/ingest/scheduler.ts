@@ -40,8 +40,8 @@ export interface SchedulerOptions {
   coldIntervalMs: number;
   hotWindowMs: number;
   closedMultiplier: number;
-  /** Signals older than this are pruned. */
-  retentionMs: number;
+  /** Signals older than this many sessions are pruned. */
+  retentionSessions: number;
 }
 
 export interface SchedulerStats {
@@ -227,7 +227,9 @@ export class Scheduler {
       await this.retier(now);
       await this.dropOrphans();
 
-      const pruned = await this.signals.pruneBefore(now - this.opts.retentionMs);
+      const pruned = await this.signals.pruneBefore(
+        this.marketClock.sessionsAgo(now, this.opts.retentionSessions),
+      );
       const idem = await this.jobs.pruneIdempotent(now - 24 * 3600_000);
       if (pruned > 0 || idem > 0) log.debug('pruned', { signals: pruned, idempotency: idem });
     } catch (err) {

@@ -62,6 +62,18 @@ export interface MarketClock {
    * explicitly.
    */
   lastCompletedSessionAt(ts: number): number;
+  /**
+   * The instant `sessions` trading sessions before `ts`.
+   *
+   * Lookback windows have to be expressed in sessions rather than in real
+   * time, because "three days ago" means two entirely different things to an
+   * exchange that closes overnight and to a simulator that compresses a
+   * session into 45 seconds. Stated in wall-clock milliseconds, a window that
+   * is a sensible three days against a live feed becomes half a trading year
+   * against the simulator - and every "since you looked" figure then divides
+   * by sqrt(120) and reports a genuine 4% move as 0.2 sigma.
+   */
+  sessionsAgo(ts: number, sessions: number): number;
   readonly name: string;
 }
 
@@ -81,6 +93,18 @@ export const exchangeClock: MarketClock = {
     // against a full day, not extrapolated.
     if (phase === 'post' || phase === 'closed') return 1;
     return sessionFractionElapsed(ts);
+  },
+  sessionsAgo: (ts, sessions) => {
+    // Walk back whole calendar days, counting only trading days. Capped so a
+    // silly input cannot spin: 400 trading days is well over a year.
+    let remaining = Math.max(0, Math.min(sessions, 400));
+    let t = ts;
+    let guard = 0;
+    while (remaining > 0 && guard++ < 1000) {
+      t -= 86_400_000;
+      if (isTradingDay(t)) remaining--;
+    }
+    return t;
   },
   lastCompletedSessionAt: (ts) => {
     const phase = marketPhase(ts);
@@ -158,6 +182,10 @@ export class SimulatedMarketClock implements MarketClock {
     const index = this.sessionIndexOf(ts);
     const sign = index < 0 ? '-' : '';
     return `S${sign}${String(Math.abs(index)).padStart(7, '0')}`;
+  }
+
+  sessionsAgo(ts: number, sessions: number): number {
+    return ts - Math.max(0, sessions) * this.sessionMs;
   }
 
   /** The last session that has finished, as a canonical timestamp. */

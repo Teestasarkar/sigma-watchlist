@@ -137,7 +137,8 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     coldIntervalMs: config.ingest.coldIntervalMs,
     hotWindowMs: config.ingest.hotWindowMs,
     closedMultiplier: config.ingest.closedMultiplier,
-    retentionMs: config.digest.maxLookbackMs * 2,
+    // Twice the maximum digest lookback: anything older can never be shown.
+    retentionSessions: config.digest.maxLookbackSessions * 3,
   });
 
   const app: App = {
