@@ -15,6 +15,7 @@ import { requireUser, withIdempotency } from '../server.js';
 import { SymbolNotFoundError } from '../../providers/types.js';
 import { ALL_SIGNAL_KINDS } from '../../services/detection.js';
 import { KIND_WEIGHT } from '../../domain/signals/scoring.js';
+import { STARTER_SYMBOLS } from '../../providers/universe.js';
 
 const Symbol_ = z
   .string()
@@ -55,24 +56,68 @@ export async function registerCoreRoutes(fastify: FastifyInstance, app: App): Pr
    */
   fastify.post('/api/session', async (req) => {
     const body = parse(
-      z.object({ handle: z.string().trim().min(1).max(40).default('demo') }),
+      z.object({
+        // A handle, not a username: there is no password, so this identifies
+        // rather than authenticates. See the note in DECISIONS.md #10.
+        handle: z
+          .string()
+          .trim()
+          .min(1)
+          .max(40)
+          .regex(/^[A-Za-z0-9 ._-]+$/, 'letters, numbers, spaces, dots, dashes and underscores only')
+          .default('demo'),
+      }),
       req.body ?? {},
     );
     const now = app.clock.now();
 
     let user = await app.users.findUserByHandle(body.handle);
+    const isNew = user === null;
+
     if (!user) {
       user = await app.users.createUser(body.handle, now);
-      await app.users.createWatchlist(
+      const list = await app.users.createWatchlist(
         user.id,
         'My Watchlist',
         now,
         app.config.limits.maxWatchlistsPerUser,
       );
+
+      /*
+       * Give a new account something to look at.
+       *
+       * A watchlist product with an empty watchlist demonstrates nothing, and
+       * this product in particular needs price *history* before it can say
+       * anything at all - so an empty first screen would be followed by a
+       * second screen saying "insufficient history". The starter set
+       * deliberately mixes volatility regimes so the significance ranking has
+       * something to prove.
+       *
+       * Best-effort per symbol: a provider hiccup must not fail a sign-in.
+       * These instruments are almost always already seeded by bootstrap, so
+       * this is a handful of row inserts rather than real fetching.
+       */
+      for (const symbol of STARTER_SYMBOLS) {
+        try {
+          await app.ingest.ensureInstrument(symbol, now, {
+            pollIntervalMs: app.config.ingest.warmIntervalMs,
+          });
+          await app.users.addItem(
+            list.id,
+            user.id,
+            symbol,
+            now,
+            null,
+            app.config.limits.maxSymbolsPerWatchlist,
+          );
+        } catch {
+          // Skip it. The user can add it by hand, and the rest still work.
+        }
+      }
     }
 
     const token = await app.users.createSession(user.id, now);
-    return { token, user };
+    return { token, user, isNew };
   });
 
   fastify.get('/api/me', async (req) => {

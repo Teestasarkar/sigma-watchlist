@@ -1111,3 +1111,88 @@ input[type="range"] {
   padding: 1px 5px;
   border-radius: 4px;
 }
+
+/* ─────────────────────────────────────────────────────────── sign-in */
+
+.signin {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 20px;
+}
+
+.signin-card {
+  width: 100%;
+  max-width: 470px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  padding: 30px 32px 26px;
+  box-shadow: var(--shadow);
+}
+
+.signin-title {
+  margin: 0 0 10px;
+  font-size: 23px;
+  font-weight: 640;
+  letter-spacing: -0.025em;
+  line-height: 1.22;
+}
+
+.signin-lede {
+  margin: 0 0 24px;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.signin .field {
+  margin-bottom: 14px;
+}
+
+.signin .field input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.signin-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.signin-error {
+  margin: 14px 0 0;
+  font-size: 12.5px;
+  color: var(--down);
+}
+
+.signin-note {
+  margin: 20px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--hairline);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
+.signin-note + .signin-note {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 12px;
+}
+
+.signin-note strong {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.signin-suggest {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 16px;
+  font-size: 11.5px;
+  color: var(--text-4);
+}

@@ -156,17 +156,22 @@ describe('watchlist management', () => {
   });
 
   it('treats re-adding an existing symbol as a no-op', async () => {
-    const first = await call('POST', `/api/watchlists/${listId}/items`, { symbol: 'MSFT' });
+    // AMD is deliberately not in the starter set a new account is seeded with,
+    // so the first add here is genuinely the first.
+    const first = await call('POST', `/api/watchlists/${listId}/items`, { symbol: 'AMD' });
     expect(first.body.added).toBe(true);
-    const again = await call('POST', `/api/watchlists/${listId}/items`, { symbol: 'MSFT' });
+    const again = await call('POST', `/api/watchlists/${listId}/items`, { symbol: 'AMD' });
     expect(again.body.added).toBe(false);
     // A no-op must not bump the version and invalidate other clients.
     expect(again.body.watchlist.version).toBe(first.body.watchlist.version);
   });
 
   it('rejects a write based on a stale version, and says what the current one is', async () => {
+    // GOOGL is outside the starter set, so this add really would change the
+    // list - which is what makes the version check meaningful rather than
+    // short-circuited by an idempotent no-op.
     const res = await call('POST', `/api/watchlists/${listId}/items`, {
-      symbol: 'JPM',
+      symbol: 'GOOGL',
       expectedVersion: version, // captured before several mutations
     });
     expect(res.status).toBe(409);
@@ -178,7 +183,7 @@ describe('watchlist management', () => {
     const lists = await call('GET', '/api/watchlists');
     const current = lists.body.watchlists[0];
     const res = await call('POST', `/api/watchlists/${listId}/items`, {
-      symbol: 'JPM',
+      symbol: 'GOOGL',
       expectedVersion: current.version,
     });
     expect(res.status).toBe(200);
@@ -231,6 +236,102 @@ describe('idempotency', () => {
     );
     expect(res.status).toBe(422);
     expect(res.body.error.code).toBe('idempotency_mismatch');
+  });
+});
+
+describe('accounts are isolated', () => {
+  /**
+   * The sign-in screen exists to make this visible, so it had better be true.
+   * Every assertion here is about one account being unable to observe or
+   * affect another.
+   */
+  it('gives a new account its own populated watchlist', async () => {
+    const handle = `newbie-${Date.now()}`;
+    const res = await call('POST', '/api/session', { handle });
+
+    expect(res.status).toBe(200);
+    expect(res.body.isNew).toBe(true);
+
+    const rows = await server.inject({
+      method: 'GET',
+      url: '/api/watchlists/all/rows',
+      headers: { authorization: `Bearer ${res.body.token}` },
+    });
+    const parsed = JSON.parse(rows.body);
+    // An empty first screen would be followed by "insufficient history".
+    expect(parsed.rows.length).toBeGreaterThan(0);
+  });
+
+  it('returns an existing account to the same identity', async () => {
+    const handle = `returning-${Date.now()}`;
+    const first = await call('POST', '/api/session', { handle });
+    const second = await call('POST', '/api/session', { handle });
+
+    expect(second.body.isNew).toBe(false);
+    expect(second.body.user.id).toBe(first.body.user.id);
+    // A second device is a second token row, not a second account.
+    expect(second.body.token).not.toBe(first.body.token);
+  });
+
+  it('keeps watchlists private, and hides their existence', async () => {
+    const a = (await call('POST', '/api/session', { handle: `a-${Date.now()}` })).body;
+    const b = (await call('POST', '/api/session', { handle: `b-${Date.now()}` })).body;
+
+    const aLists = await server.inject({
+      method: 'GET',
+      url: '/api/watchlists',
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    const aListId = JSON.parse(aLists.body).watchlists[0].id;
+
+    const read = await server.inject({
+      method: 'GET',
+      url: `/api/watchlists/${aListId}/rows`,
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    const write = await server.inject({
+      method: 'POST',
+      url: `/api/watchlists/${aListId}/items`,
+      headers: { authorization: `Bearer ${b.token}` },
+      payload: { symbol: 'TSLA' },
+    });
+
+    // 404 rather than 403, deliberately: a 403 would confirm the list exists.
+    expect(read.statusCode).toBe(404);
+    expect(write.statusCode).toBe(404);
+  });
+
+  it('moves one account checkpoint without touching another', async () => {
+    const a = (await call('POST', '/api/session', { handle: `wm-a-${Date.now()}` })).body;
+    const b = (await call('POST', '/api/session', { handle: `wm-b-${Date.now()}` })).body;
+
+    const digestFor = async (token: string): Promise<number> => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/digest',
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const d = JSON.parse(res.body);
+      return d.groups.reduce((n: number, g: { signals: unknown[] }) => n + g.signals.length, 0);
+    };
+
+    await refreshAll();
+    const bBefore = await digestFor(b.token);
+
+    await server.inject({
+      method: 'POST',
+      url: '/api/digest/acknowledge',
+      headers: { authorization: `Bearer ${a.token}` },
+      payload: {},
+    });
+
+    expect(await digestFor(a.token)).toBe(0);
+    expect(await digestFor(b.token)).toBe(bBefore);
+  });
+
+  it('rejects a handle that is not a handle', async () => {
+    const res = await call('POST', '/api/session', { handle: 'drop table users;--' });
+    expect(res.status).toBe(400);
   });
 });
 

@@ -24,6 +24,7 @@ import { SymbolDetail } from './components/SymbolDetail.js';
 import { Lab } from './components/Lab.js';
 import { AddSymbol } from './components/AddSymbol.js';
 import { Banner, Spinner } from './components/primitives.js';
+import { SignIn } from './components/SignIn.js';
 
 type View = { name: 'briefing' } | { name: 'list' } | { name: 'lab' } | { name: 'symbol'; symbol: string };
 
@@ -84,35 +85,61 @@ export default function App(): React.JSX.Element {
     } catch (err) {
       if (seq !== loadSeq.current) return;
       if (err instanceof ApiError && err.status === 401) {
-        // Session gone; sign back in as the demo user rather than dead-ending.
-        await api.signIn('demo').then(setUser).catch(() => undefined);
+        // The session went away underneath us. Return to sign-in rather than
+        // quietly adopting a different identity, which would be worse: the
+        // user would be looking at someone else's checkpoint.
+        api.signOut();
+        setUser(null);
+        setDigest(null);
+        setRows([]);
         return;
       }
       setError(err instanceof Error ? err.message : 'could not load your watchlist');
     }
   }, []);
 
-  // Boot: sign in if needed, then load.
+  /**
+   * Load everything that belongs to the signed-in user.
+   *
+   * Separate from boot so signing in mid-session runs exactly the same path,
+   * rather than a second, subtly-different one.
+   */
+  const loadForUser = useCallback(async (): Promise<void> => {
+    const lists = await api.watchlists();
+    setWatchlist(lists.watchlists[0] ?? null);
+    await load();
+  }, [load]);
+
+  /*
+   * Boot.
+   *
+   * Deliberately does NOT sign anyone in. A stored token is resolved and
+   * trusted; an absent or rejected one shows the sign-in screen. Silently
+   * signing every visitor in as `demo` - which is what this used to do - hid
+   * the fact that the app is multi-tenant at all.
+   */
   useEffect(() => {
     void (async () => {
       try {
-        if (!getToken()) {
-          setUser(await api.signIn('demo'));
-        } else {
-          const me = await api.me().catch(async () => ({ user: await api.signIn('demo') }));
-          setUser(me.user);
-        }
         setMeta(await api.meta());
-        const lists = await api.watchlists();
-        setWatchlist(lists.watchlists[0] ?? null);
-        await load();
+
+        if (getToken()) {
+          const me = await api.me().catch(() => null);
+          if (me) {
+            setUser(me.user);
+            await loadForUser();
+          } else {
+            // The token is stale or revoked. Drop it and ask who they are.
+            api.signOut();
+          }
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'could not start');
+        setError(err instanceof Error ? err.message : 'could not reach the server');
       } finally {
         setBooting(false);
       }
     })();
-  }, [load]);
+  }, [loadForUser]);
 
   /**
    * Poll, but only while the tab is visible.
@@ -289,10 +316,31 @@ export default function App(): React.JSX.Element {
 
   // ── render ───────────────────────────────────────────────────────
 
+  const handleSignedIn = (signedIn: User, isNew: boolean): void => {
+    setUser(signedIn);
+    setError(null);
+    flash(
+      isNew
+        ? `Welcome, ${signedIn.handle}. A starter watchlist is ready — history is already seeded, so the numbers mean something immediately.`
+        : `Welcome back, ${signedIn.handle}. Your checkpoint is where you left it.`,
+    );
+    void loadForUser();
+  };
+
+  const signOut = (): void => {
+    api.signOut();
+    setUser(null);
+    setDigest(null);
+    setRows([]);
+    setWatchlist(null);
+    setCanUndo(false);
+    navigate({ name: 'briefing' });
+  };
+
   if (booting) {
     return (
       <div className="app">
-        <Header view={view} navigate={navigate} unread={0} meta={null} user={null} />
+        <Header view={view} navigate={navigate} unread={0} meta={null} user={null} onSignOut={signOut} />
         <main className="shell" style={{ paddingTop: 60, display: 'flex', justifyContent: 'center' }}>
           <Spinner />
         </main>
@@ -300,9 +348,18 @@ export default function App(): React.JSX.Element {
     );
   }
 
+  // The auth gate. No token, no data - and no silently borrowed identity.
+  if (!user) {
+    return (
+      <div className="app">
+        <SignIn onSignedIn={handleSignedIn} />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
-      <Header view={view} navigate={navigate} unread={unread} meta={meta} user={user} />
+      <Header view={view} navigate={navigate} unread={unread} meta={meta} user={user} onSignOut={signOut} />
 
       <main className="shell">
         {error ? (
@@ -396,12 +453,14 @@ function Header({
   unread,
   meta,
   user,
+  onSignOut,
 }: {
   view: View;
   navigate: (v: View) => void;
   unread: number;
   meta: Meta | null;
   user: User | null;
+  onSignOut: () => void;
 }): React.JSX.Element {
   return (
     <header className="header">
@@ -434,7 +493,22 @@ function Header({
         </nav>
 
         {user ? (
-          <span style={{ fontSize: 12, color: 'var(--text-4)' }}>{user.handle}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span
+              className="num"
+              style={{ fontSize: 12, color: 'var(--text-3)' }}
+              title="Watchlists, checkpoints and thresholds all belong to this account"
+            >
+              {user.handle}
+            </span>
+            <button
+              className="btn-ghost btn-sm"
+              onClick={onSignOut}
+              title="Sign out and switch account"
+            >
+              Sign out
+            </button>
+          </div>
         ) : null}
       </div>
     </header>

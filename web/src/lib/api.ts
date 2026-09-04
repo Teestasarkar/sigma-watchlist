@@ -137,14 +137,14 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 // ─────────────────────────────────────────────────────────── endpoints
 
 export const api = {
-  async signIn(handle = 'demo'): Promise<User> {
-    const res = await request<{ token: string; user: User }>('/api/session', {
+  async signIn(handle = 'demo'): Promise<{ user: User; isNew: boolean }> {
+    const res = await request<{ token: string; user: User; isNew?: boolean }>('/api/session', {
       method: 'POST',
       body: { handle },
       idempotent: false,
     });
     storeToken(res.token);
-    return res.user;
+    return { user: res.user, isNew: res.isNew === true };
   },
 
   signOut(): void {
