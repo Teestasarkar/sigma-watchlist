@@ -1,0 +1,58 @@
+# Keeps the free-tier instance awake.
+#
+# A free Render service sleeps after ~15 minutes of inactivity and takes 30-50s
+# to cold-start. For a product whose entire premise is "come back later and see
+# what changed", a sleeping instance is worse than slow: while it is asleep it
+# is not ingesting, so there is nothing to have changed.
+#
+# Two things make that survivable, and this workflow is only the second of them:
+#
+#  1. Backfill. On waking, the ingester notices the sessions that closed while
+#     it was asleep and re-fetches them, so a gap costs latency rather than
+#     correctness. That is the real fix and it lives in the application.
+#  2. This ping, which keeps the gaps small in the first place.
+#
+# It is deliberately a health check rather than a synthetic page load: cheap,
+# honest about what it is measuring, and it fails loudly if the database is
+# unreachable.
+
+name: Keep warm
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's scheduler is best-effort and can be minutes
+    # late under load, which is fine - the target is "usually awake", not an SLA.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping health endpoint
+        env:
+          # Set this as a repository variable (Settings → Variables → Actions).
+          # Absent, the job no-ops rather than failing every ten minutes.
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "APP_URL is not set; nothing to keep warm."
+            exit 0
+          fi
+
+          # Generous timeout: a cold start is the case we are paying for.
+          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' \
+                   --max-time 90 --retry 2 --retry-delay 15 \
+                   "$APP_URL/api/health" || echo 000)
+
+          echo "HTTP $code"
+          cat /tmp/health.json 2>/dev/null || true
+          echo
+
+          # 200 only when the database answered too, so this catches a running
+          # process with a dead database - the failure a naive ping misses.
+          if [ "$code" != "200" ]; then
+            echo "::warning::health check returned $code"
+            exit 1
+          fi

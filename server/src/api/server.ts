@@ -201,36 +201,44 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       .send(translated.toBody());
   });
 
-  fastify.setNotFoundHandler((req, reply) => {
-    void reply.code(404).send({
-      error: { code: 'not_found', message: `no route for ${req.method} ${req.url}` },
-    });
-  });
-
   // ── Routes ──────────────────────────────────────────────────────────
   await registerCoreRoutes(fastify, app);
   await registerOpsRoutes(fastify, app);
 
-  // Serving the built frontend from the API process gives production a single
-  // origin, which removes CORS from the deployment entirely.
+  /*
+   * Serving the built frontend from the API process gives production a single
+   * origin, which removes CORS from the deployment entirely - and on free
+   * hosting, removes a whole second service.
+   */
+  let serveStatic = false;
   if (app.config.serveWeb) {
     const staticPlugin = await import('@fastify/static');
     const { resolve } = await import('node:path');
     const root = resolve(process.cwd(), process.env.WEB_ROOT ?? '../web/dist');
     await fastify.register(staticPlugin.default, { root, wildcard: false });
-
-    // SPA fallback: anything that is not an API route serves index.html so
-    // client-side routes survive a hard refresh.
-    fastify.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api')) {
-        void reply.code(404).send({
-          error: { code: 'not_found', message: `no route for ${req.method} ${req.url}` },
-        });
-        return;
-      }
-      void reply.sendFile('index.html');
-    });
+    serveStatic = true;
   }
+
+  /*
+   * Exactly one not-found handler.
+   *
+   * Fastify permits a single handler per prefix, so this has to cover both
+   * cases rather than being registered twice - which is a startup crash that
+   * only appears when SERVE_WEB is on, i.e. only in production.
+   *
+   * An unmatched /api path is always JSON: a client parsing a 404 must not
+   * suddenly receive HTML. Anything else falls back to index.html so that
+   * client-side routes survive a hard refresh.
+   */
+  fastify.setNotFoundHandler((req, reply) => {
+    if (!serveStatic || req.url.startsWith('/api')) {
+      void reply.code(404).send({
+        error: { code: 'not_found', message: `no route for ${req.method} ${req.url}` },
+      });
+      return;
+    }
+    void reply.sendFile('index.html');
+  });
 
   return fastify;
 }

@@ -1,0 +1,412 @@
+# Sigma
+
+**A watchlist that answers "should I care?" instead of "what's the price?"**
+
+```bash
+npm install && npm run dev     # → http://localhost:5173
+```
+
+No database to install, no API keys, no configuration. It runs.
+
+---
+
+## The problem with the obvious watchlist
+
+A conventional watchlist is a table of tickers sorted by percentage change. It
+has three flaws, and they compound:
+
+**1. Percentage change is not information.** A 2% move in a utility is a
+three-sigma event that ought to interrupt your day. A 5% move in GameStop is a
+Tuesday. Ranking by percentage guarantees the same handful of volatile names
+dominate forever, while the genuinely surprising moves in quiet names never
+surface. You learn to ignore the top of the list.
+
+**2. "Today's change" is the wrong reference point.** You did not last look at
+this at 09:30. You looked on Thursday. The number you want is the change since
+*your* last visit, and no watchlist tracks that.
+
+**3. It cannot tell the market from the company.** If your holding is down 3%
+on a day the whole index is down 3%, nothing happened to that company. A table
+of red numbers reports ten separate alarms for one macro event — and stays
+silent when a stock falls 1% on a day everything else rose 2%, which is the
+one that actually deserves a look.
+
+So this is not a table. It is a **diff against your last visit**, ranked by how
+unusual each change is *for that specific instrument*.
+
+---
+
+## Three ideas do the work
+
+### 1. A personal watermark
+
+Every user has a per-symbol checkpoint: the last state of the world they
+actually acknowledged, price included. The home screen is `now − checkpoint`.
+
+The checkpoint moves **only when you press the button.** Reading the briefing
+does not consume it, and a page refresh cannot destroy it. Glancing at your
+phone on the train must not eat the briefing you meant to read at your desk.
+And because it is one click, it is undoable — one level deep, including the
+very first acknowledgement, where the correct "previous state" is *no
+checkpoint at all*.
+
+### 2. Significance, not magnitude
+
+Every move is divided by what that instrument normally does over the same
+amount of **market** time:
+
+```
+significance = return_since_checkpoint / (σ_daily × √sessions_elapsed)
+```
+
+Two details matter more than they look:
+
+- **Market time, not wall-clock time.** A checkpoint set on Friday evening and
+  read on Monday morning spans *one* session of risk, not three days of it.
+  Using wall-clock time would make every Monday look calm.
+- **The horizon is floored.** Without a floor, a 1% move ten seconds after your
+  checkpoint divides by almost nothing and reads as forty sigma.
+
+Then the move is split into the part the market explains and the part it does
+not:
+
+```
+residual = return − β × market_return
+```
+
+β comes from an actual regression of the instrument's daily returns on the
+benchmark's. The residual is what "something happened to this company" means,
+and it is frequently the **opposite sign** to the headline number.
+
+### 3. Episodes, not samples
+
+A stock that is 3σ down and *stays* 3σ down is one event. Poll it every five
+seconds for a day and a naive engine produces seventeen thousand alerts about
+it. The user mutes the product and it has failed at the only thing it promised.
+
+So each detector drives a hysteresis state machine: a condition **enters** an
+episode at one threshold and only **leaves** at a lower one. The dead band
+absorbs a value oscillating around a single threshold.
+
+```
+ value
+   │        ╭──── one episode ────╮
+2.0├────────┼─────────────────────┼──── enter
+   │      ╭─╯                     ╰─╮
+1.0├──────┼─────────────────────────┼── exit
+   │  ╭───╯                         ╰────
+   └──┴───────────────────────────────────▶ time
+      ↑ silent      ONE signal        ↑ closes
+```
+
+Three refinements earn their place:
+
+- **Intensifying revises in place.** A move deepening from 2.2σ to 4.1σ updates
+  the existing signal rather than adding a second one — but does not touch
+  `detected_at`, or an old signal could leapfrog your watermark and reappear as
+  new.
+- **A changed character starts a new episode.** A 30-day high becoming a
+  52-week high is genuinely new information, so the episode key includes a
+  discriminator.
+- **State is persisted, not remembered.** If it lived in memory, every deploy
+  would re-announce every currently-elevated symbol. A restart must be silent.
+
+---
+
+## What counts as meaningful
+
+Ten detectors, each a pure function of a world snapshot. All thresholds live in
+[`server/src/config.ts`](server/src/config.ts) so the product's opinion is
+auditable in one place rather than scattered as magic numbers.
+
+| Signal | Fires when | Why it earns a slot |
+| --- | --- | --- |
+| `idio_move` | market-adjusted move ≥ 2σ of residual vol | The highest-weighted signal. "Something happened *here*." |
+| `sigma_move` | move since previous close ≥ 2σ of own vol | Magnitude relative to this name's own noise. |
+| `gap` | open vs prior close ≥ 1.5× ATR | Repriced overnight — you could not have traded through it. |
+| `range_break` | through the 52-week or 30-day extreme | A level that has held for a long time. |
+| `volume_spike` | ≥ 2.5× median volume, **paced by session progress** | Unpaced, this fires on the time of day rather than the market. |
+| `trend_flip` | 20/50-session average crossover | Slow, and therefore exactly what a returning user missed. |
+| `vol_regime` | 10-session vol ≥ 1.8× the 90-session baseline | "This name has become dangerous." |
+| `drawdown` | crossing a 10/20/30/50% bucket below the 52-week peak | Bucketed, so a two-month grind produces three signals, not thousands. |
+| `stale_data` | no fresh price beyond the staleness budget | **The absence of data is news.** See below. |
+| `data_conflict` | providers disagree beyond tolerance | Surfaced, never silently resolved. |
+
+### Two deliberate refusals
+
+**It says when it does not know.** A detector without enough history returns
+`null`, not a guess. The UI renders *"insufficient history"* rather than an
+invented volatility. `null` and `0` are different answers and the difference is
+the product's credibility.
+
+**It suppresses analysis it cannot stand behind.** When a quote goes stale, the
+market detectors are silenced — computing "3.4σ move" from an hour-old price is
+confident nonsense and the user cannot tell. The *integrity* detectors are
+exempt, because reporting the staleness is precisely what should happen.
+
+### Ranking, and a noise budget
+
+Detection asks "did something happen?". Ranking asks the harder question:
+*of the things that happened, which does this person need to read?*
+
+```
+score = severity × kind_weight × recency_decay × pin_boost × confidence
+```
+
+Multiplicative, so a muted symbol or a worthless data source drives the score
+toward zero rather than merely subtracting a constant. Then:
+
+- **A hard cap on items.** A briefing that does not fit on a screen is a feed.
+  What does not fit is *counted*, not dropped silently.
+- **A per-symbol cap.** One dramatic stock must not consume the whole briefing
+  and hide the other nine things.
+- **Every item shows its reasoning** and expands to the raw numbers. A ranking
+  nobody can audit is a ranking nobody should trust.
+- **Saying nothing happened is a feature.** The briefing names the symbols it
+  checked and deliberately found unremarkable. Without that, the user re-scans
+  the whole watchlist anyway and the ranking was pointless.
+
+---
+
+## Architecture
+
+```
+                        ┌─────────────────────────────────────┐
+   providers            │        detection (global)           │
+   ┌──────────┐         │                                     │
+   │ synthetic│──┐      │  quote ─▶ 10 detectors ─▶ episode   │
+   │ finnhub  │──┼─▶ registry ─▶     (pure)        machine    │
+   │ …        │──┘      │                             │       │
+   └──────────┘  │      └─────────────────────────────┼───────┘
+                 │                                    ▼
+        single-flight ─ rate limit ─ breaker    signals table
+        ─ retry ─ timeout ─ reconcile        (append-only, unique
+                 │                            per symbol+kind+episode)
+                 ▼                                    │
+          quotes / bars / stats                       │
+                 │                                    │
+                 └──────────────┬─────────────────────┘
+                                ▼
+                    read path: signals ⋈ user_symbol_marks
+                                ▼
+                          ranked briefing
+```
+
+**Detection is global; personalisation is a read-time join.** Ten thousand
+users watching AAPL share one detection cycle and one signal row. The cost of
+the system scales with the number of *instruments people care about*, not with
+the number of people. This is the single decision the whole design rests on.
+
+### How it scales
+
+| Dimension | Mechanism |
+| --- | --- |
+| Many users, same symbols | Signals are global. `watchlist_items(symbol)` is a **reverse index**: the poller works from the union of all watchlists, so a symbol held by 10,000 users costs one request per cycle. |
+| Large watchlists | The read path is a fixed number of batched queries — no query inside a loop. 500 symbols costs the same round trips as 5. Statistics are materialised on session close, not recomputed per request. |
+| Many symbols | `ingest_jobs` is a queue table, not a timer per symbol. `FOR UPDATE SKIP LOCKED` hands concurrent workers **disjoint** batches, so the ingest tier scales horizontally with no coordination service. |
+| Attention | Three poll tiers. A symbol someone is *looking at* polls every 5s; one merely sitting in a list, every 20s; one nobody has opened, every 2 min. Attention earns freshness — that is what makes a 500-symbol list affordable. |
+| Bounded cost | Batch size caps per-tick work; concurrency is bounded inside a batch; market-closed multiplies every interval by 8. |
+| Unbounded growth | Signals and idempotency keys are pruned past the maximum digest lookback. Bind-parameter limits are chunked, so the user with 3,000 symbols does not hit a wall nobody tested. |
+
+### Handling unreliable data
+
+Every one of these exists because it was hit, and each is exercised by a test:
+
+- **Out-of-order responses.** Concurrent fetches can complete in the wrong
+  order. `upsertQuote` carries `WHERE as_of <= excluded.as_of`, so an older
+  response cannot overwrite a newer one and make the price visibly jump
+  backwards. The write reports whether it was accepted; detection skips a
+  rejected one.
+- **Provider disagreement.** Two sources beyond tolerance produce a recorded
+  conflict, a lowered confidence, and a user-visible warning. The accepted
+  price is the **median** (robust to one bad feed) rather than the freshest
+  (which lets a single broken fast provider win every time).
+- **Garbage prices.** A provider returning `0` for a price is discarded rather
+  than propagated as a −100% move.
+- **Staleness as a ladder,** not a boolean: fresh → delayed → stale → unknown,
+  each rendered differently. A future timestamp is `unknown`, not fresh —
+  that's a broken clock, not a current price.
+- **Circuit breaker** per provider, three-state. Half-open admits exactly *one*
+  probe, so a still-broken provider trips again after one request rather than
+  after a burst. An unknown symbol never counts toward the failure ratio —
+  otherwise one user's typo'd tickers would trip the breaker for everybody.
+- **Jittered backoff.** When a provider dies, every symbol fails at once and
+  would otherwise retry in lockstep forever — a self-inflicted thundering herd
+  arriving exactly when the upstream can least cope.
+- **Delisting.** A symbol no provider recognises is *marked*, not deleted. The
+  user put it there deliberately and its disappearance is the news. It is
+  un-marked automatically when it resolves again.
+- **Downtime.** On waking, the ingester notices the sessions that closed while
+  it was asleep, re-fetches them, and runs detection over the gap. **Downtime
+  costs latency, not correctness** — which is what makes a free host that
+  sleeps a viable place to run this.
+- **Idempotency.** Mutating requests take an `Idempotency-Key`; a retry replays
+  the stored response. Reusing a key with a *different* body is rejected rather
+  than silently swallowing the second intent.
+- **Concurrent edits.** Watchlists carry a version, checked under `FOR UPDATE`
+  — without the row lock the check is decorative, since two requests could both
+  read v4, both pass, and both write. The loser gets a 409 *with the current
+  version* so it can reconcile in one round trip.
+
+---
+
+## Running it
+
+### Locally
+
+```bash
+npm install
+npm run dev          # API :8787 + web :5173
+```
+
+`npm install` is the only setup step. Local development runs **embedded
+Postgres** ([PGlite](https://pglite.dev), Postgres compiled to WASM), so there
+is a real database with real Postgres semantics and nothing to install.
+
+```bash
+npm test             # 186 tests
+npm run typecheck    # both workspaces
+npm run seed         # warm every instrument + a few ingest cycles
+npm run reset        # drop everything and reseed
+```
+
+### The Lab
+
+Open **Lab** in the running app. It breaks the system on purpose:
+
+| Button | What you should see |
+| --- | --- |
+| `NEE +2.5%` vs `GME +6%` | The utility outranks the meme stock despite moving less than half as far. |
+| `Come back later −60m` | Rewinds your checkpoint. The briefing widens to cover the window. |
+| `100% failure` | The breaker opens after a few failures. Prices keep serving, labelled with their age. |
+| `Age 45 min` | Staleness warnings replace statistical claims. |
+| `Halt TSLA` / `Delist GME` | Halted and vanished instruments, handled distinctly. |
+| `Skew prices 3%` | With two providers, a recorded conflict and lowered confidence. |
+
+Resilience you cannot demonstrate is decoration. This is how you check.
+
+### Against a real market feed
+
+```bash
+FINNHUB_API_KEY=… PROVIDERS=finnhub,synthetic npm run dev
+```
+
+Nothing else changes. The same registry wraps it in the same breaker, rate
+limiter and reconciliation; the same detectors consume its output. The
+simulator becomes the fallback for whatever the live feed cannot answer.
+
+### In production
+
+One service, single origin — the API serves the built frontend, which removes
+CORS from the deployment entirely.
+
+```bash
+DATABASE_URL=postgres://…  SERVE_WEB=1  npm run build && npm start
+```
+
+Setting `DATABASE_URL` switches from embedded to managed Postgres. **Same SQL
+either way** — one dialect, so every query is tested against the database users
+actually hit. See [`docs/DECISIONS.md`](docs/DECISIONS.md) for why that
+mattered enough to give up SQLite's convenience.
+
+---
+
+## About the market data
+
+The default feed is a **simulator**, and the app says so, in the UI and in
+every quote's `source` field. The tickers are real so the demo reads naturally;
+**the prices are invented.**
+
+That is a deliberate product decision, not a shortcut. Every free market API is
+rate-limited into uselessness for a 30-symbol watchlist polled continuously,
+and half are unofficial endpoints that break without notice — so the reviewer's
+first experience would be an empty screen and a 429.
+
+More importantly, the interesting behaviour becomes reproducible. "Show me what
+a 4σ move looks like" is a button, not a wait for the right Tuesday.
+
+The simulator is not noise. Returns have a genuine three-factor structure:
+
+```
+r = drift + β×market + β_sector×sector + idiosyncratic + jump
+```
+
+with volatility clustering, per-symbol jump intensities, and Brownian-bridge
+intraday paths that terminate exactly on each session's close. Because the
+market factor is real, **regressing the generated data recovers the betas it
+was generated from** — which is what makes "the market explains this" a claim
+the engine can verify rather than assert. There is a test for exactly that.
+
+Everything is a pure function of `(seed, symbol, session)` — no accumulated
+state — so it survives restarts, answers out of order, and is reproducible.
+
+---
+
+## API
+
+Bearer token; `POST /api/session` issues one.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/digest` | The briefing. Side-effect free with respect to the watermark. |
+| `POST /api/digest/acknowledge` | Advance the checkpoint. Idempotent. |
+| `POST /api/digest/undo` | Restore the previous checkpoint. |
+| `POST /api/signals/read` | Dismiss individual signals without moving the checkpoint. |
+| `GET /api/watchlists/:id/rows` | The table. `all` spans every list. |
+| `POST/PATCH/DELETE /api/watchlists/:id/items…` | Manage symbols, pins, mutes, per-symbol thresholds. |
+| `GET /api/symbols/:symbol` | Full detail: history, statistics, signal timeline, plumbing. |
+| `GET /api/health` | Readiness — 200 only when the database actually answers. |
+| `GET /api/ops/diagnostics` | Scheduler, breakers, poll queue, active faults. |
+| `POST /api/dev/*` | Fault injection. Gated behind `DEV_TOOLS`. |
+
+Errors carry a stable machine-readable `code` alongside the human message.
+Clients branch on the code; parsing prose to decide whether to retry breaks on
+a copy edit.
+
+---
+
+## Layout
+
+```
+server/src/
+  domain/          pure logic — no I/O, no clock reads
+    stats.ts         volatility, ATR, OLS regression
+    calendar.ts      NYSE hours and holidays
+    marketClock.ts   "what is a session?" as an injectable interface
+    signals/
+      detectors.ts   ← the product's opinion about "meaningful"
+      hysteresis.ts  ← the episode state machine
+      scoring.ts     ← ranking and the noise budget
+  providers/       upstream feeds behind one interface + reconciliation
+  db/              schema, migrations, repositories (all SQL lives here)
+  services/        detection, ingestion, read models
+  ingest/          the queue-driven scheduler
+  api/             HTTP, auth, idempotency, error translation
+web/src/           React, no state-management library
+docs/DECISIONS.md  what was chosen, what was given up, and when to revisit
+```
+
+`domain/` takes no dependencies on anything below it. That is what lets the
+interesting logic be tested without standing anything up — and it is why the
+test suite runs in 15 seconds with no mocking framework.
+
+---
+
+## What I would do next
+
+Honest gaps, in the order I would close them:
+
+1. **Notifications.** The engine already knows what is worth interrupting
+   someone for, and the episode machine already guarantees it fires once. Email
+   or push is the natural next surface, and the hard part is done.
+2. **Sector factors in the regression.** Currently one market factor. A second
+   sector factor would separate "all banks moved" from "this bank moved" — the
+   simulator already generates them, so the engine is the missing half.
+3. **Per-user threshold learning.** Dismissals are recorded but not yet used.
+   A user who repeatedly dismisses `volume_spike` is telling us its weight is
+   wrong *for them*.
+4. **Corporate actions.** A 2-for-1 split is currently a −50% move. Real
+   deployment needs an adjustment feed; the bar table would need an
+   adjustment factor.
+5. **Read replicas.** The read path is already batched and index-only, so it
+   would move to a replica without code changes. Not needed at this scale.

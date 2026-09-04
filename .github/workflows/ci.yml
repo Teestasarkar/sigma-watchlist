@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes an in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` rather than `npm install`: the lockfile is the input, so a
+      # transitive dependency cannot change under CI without a commit.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The suite needs no database service. Tests run against embedded
+      # Postgres, which is the same engine production uses.
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # A quick smoke test of the built artefact, so a runtime-only failure
+      # (a bad import path, a plugin registered twice) cannot reach a deploy.
+      # `setNotFoundHandler` being registered twice was exactly that bug: it
+      # typechecked, tested green, and only crashed with SERVE_WEB on.
+      - name: Smoke-test the production build
+        working-directory: server
+        env:
+          SERVE_WEB: '1'
+          WEB_ROOT: ../web/dist
+          NODE_ENV: production
+          INGEST_ENABLED: '0'
+          PORT: '8787'
+        run: |
+          node dist/main.js > server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null; then break; fi
+            sleep 2
+          done
+          echo "--- health ---"
+          curl -fsS http://127.0.0.1:8787/api/health
+          echo
+          echo "--- frontend is served ---"
+          curl -fsS http://127.0.0.1:8787/ | grep -q '<div id="root">'
+          echo "--- api 404 stays JSON ---"
+          curl -s http://127.0.0.1:8787/api/definitely-not-a-route | grep -q '"code"'
+          echo "smoke test passed"
+
+      - name: Show server log on failure
+        if: failure()
+        working-directory: server
+        run: cat server.log || true

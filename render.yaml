@@ -1,0 +1,48 @@
+# Render blueprint: one free web service serving the API *and* the built
+# frontend from a single origin.
+#
+# Single origin is deliberate. It removes CORS from the deployment entirely,
+# and on a free tier it removes a whole second service - fewer moving parts to
+# cold-start, one URL to share.
+services:
+  - type: web
+    name: sigma-watchlist
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    # Render restarts the instance if this stops answering. It returns 200 only
+    # when the database actually responds, so a broken instance is taken out of
+    # rotation rather than left serving errors.
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      # Serve web/dist from the API process.
+      - key: SERVE_WEB
+        value: "1"
+      - key: LOG_JSON
+        value: "1"
+      # Managed Postgres connection string. Set this in the Render dashboard;
+      # never commit it.
+      - key: DATABASE_URL
+        sync: false
+      # Free-tier Postgres has a low connection cap and the API is I/O bound on
+      # a handful of fast indexed queries, so a small pool is correct.
+      - key: PG_POOL_MAX
+        value: "5"
+      # Keep the fault-injection Lab available on the demo deployment. Set to 0
+      # to remove those routes entirely.
+      - key: DEV_TOOLS
+        value: "1"
+      # A free instance sleeps when idle, so it wakes with a gap in its
+      # history. Backfill handles that correctly - see IngestService - but a
+      # gentler poll cadence keeps the instance well inside its CPU allowance.
+      - key: INGEST_TICK_MS
+        value: "1500"
+      - key: INGEST_BATCH
+        value: "8"

@@ -1,0 +1,6 @@
+# Normalise line endings so the repo is identical on every platform and the
+# diff noise from Windows checkouts disappears.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
