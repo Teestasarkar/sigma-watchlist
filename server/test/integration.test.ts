@@ -27,6 +27,9 @@ const SESSION_MS = 60_000;
  */
 const clock = new ManualClock(Date.now());
 
+/** Strong enough to pass the real strength rules. */
+const TEST_PASSWORD = 'quiet-river-lantern-42';
+
 const config = {
   ...baseConfig,
   databaseUrl: '',
@@ -72,7 +75,10 @@ beforeAll(async () => {
   server = await buildServer({ app });
   await server.ready();
 
-  const session = await call('POST', '/api/session', { handle: 'tester' });
+  const session = await call('POST', '/api/auth/register', {
+    handle: 'tester',
+    password: TEST_PASSWORD,
+  });
   token = session.body.token;
 
   // Seed a couple of instruments with contrasting volatility, so the
@@ -247,9 +253,9 @@ describe('accounts are isolated', () => {
    */
   it('gives a new account its own populated watchlist', async () => {
     const handle = `newbie-${Date.now()}`;
-    const res = await call('POST', '/api/session', { handle });
+    const res = await call('POST', '/api/auth/register', { handle, password: TEST_PASSWORD });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     expect(res.body.isNew).toBe(true);
 
     const rows = await server.inject({
@@ -264,9 +270,10 @@ describe('accounts are isolated', () => {
 
   it('returns an existing account to the same identity', async () => {
     const handle = `returning-${Date.now()}`;
-    const first = await call('POST', '/api/session', { handle });
-    const second = await call('POST', '/api/session', { handle });
+    const first = await call('POST', '/api/auth/register', { handle, password: TEST_PASSWORD });
+    const second = await call('POST', '/api/auth/login', { handle, password: TEST_PASSWORD });
 
+    expect(second.status).toBe(200);
     expect(second.body.isNew).toBe(false);
     expect(second.body.user.id).toBe(first.body.user.id);
     // A second device is a second token row, not a second account.
@@ -274,8 +281,8 @@ describe('accounts are isolated', () => {
   });
 
   it('keeps watchlists private, and hides their existence', async () => {
-    const a = (await call('POST', '/api/session', { handle: `a-${Date.now()}` })).body;
-    const b = (await call('POST', '/api/session', { handle: `b-${Date.now()}` })).body;
+    const a = (await call('POST', '/api/auth/register', { handle: `a-${Date.now()}`, password: TEST_PASSWORD })).body;
+    const b = (await call('POST', '/api/auth/register', { handle: `b-${Date.now()}`, password: TEST_PASSWORD })).body;
 
     const aLists = await server.inject({
       method: 'GET',
@@ -302,8 +309,8 @@ describe('accounts are isolated', () => {
   });
 
   it('moves one account checkpoint without touching another', async () => {
-    const a = (await call('POST', '/api/session', { handle: `wm-a-${Date.now()}` })).body;
-    const b = (await call('POST', '/api/session', { handle: `wm-b-${Date.now()}` })).body;
+    const a = (await call('POST', '/api/auth/register', { handle: `wm-a-${Date.now()}`, password: TEST_PASSWORD })).body;
+    const b = (await call('POST', '/api/auth/register', { handle: `wm-b-${Date.now()}`, password: TEST_PASSWORD })).body;
 
     const digestFor = async (token: string): Promise<number> => {
       const res = await server.inject({
@@ -330,7 +337,7 @@ describe('accounts are isolated', () => {
   });
 
   it('rejects a handle that is not a handle', async () => {
-    const res = await call('POST', '/api/session', { handle: 'drop table users;--' });
+    const res = await call('POST', '/api/auth/register', { handle: 'drop table users;--', password: TEST_PASSWORD });
     expect(res.status).toBe(400);
   });
 });
@@ -367,7 +374,7 @@ describe('the watermark', () => {
   it('is undoable even on the very first acknowledgement', async () => {
     // The first ack has no previous checkpoint to restore, so undo must remove
     // the mark entirely rather than silently doing nothing.
-    const fresh = await call('POST', '/api/session', { handle: `first-${Date.now()}` });
+    const fresh = await call('POST', '/api/auth/register', { handle: `first-${Date.now()}`, password: TEST_PASSWORD });
     const otherToken = fresh.body.token;
 
     const lists = await server.inject({

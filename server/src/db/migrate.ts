@@ -1,40 +1,44 @@
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { MIGRATIONS, SCHEMA_VERSION } from './schema.js';
 import type { SqlClient } from './sql.js';
 import { n } from './sql.js';
 import { createLogger } from '../infra/logger.js';
 
 const log = createLogger('migrate');
 
+/** Arbitrary but fixed application lock id. */
+const LOCK_ID = 0x5194a;
+
 /**
- * Bring the database up to `SCHEMA_VERSION`.
+ * Bring the database up to `SCHEMA_VERSION`, one step at a time.
  *
- * The whole migration runs inside one transaction, so the database ends up
+ * Everything happens inside a single transaction, so the database ends up
  * either fully migrated or untouched - never half-way. Postgres supports
- * transactional DDL, which is what makes that possible; it is one of the
+ * transactional DDL, which is what makes that possible, and is one of the
  * reasons the local driver is embedded Postgres rather than SQLite.
  *
- * A concurrent second instance starting at the same moment is handled by
- * taking an advisory lock first: the loser waits, then sees the version is
- * current and does nothing.
+ * A concurrent second instance starting at the same moment is handled by the
+ * advisory lock: the loser waits, then reads the version, finds it current, and
+ * does nothing.
  */
 export async function migrate(sql: SqlClient): Promise<void> {
-  // Arbitrary but fixed application lock id.
-  const LOCK_ID = 0x5194a;
-
   await sql.tx(async () => {
     await sql.query('SELECT pg_advisory_xact_lock($1)', [LOCK_ID]);
 
     const current = await readVersion(sql);
-
-    if (current === SCHEMA_VERSION) return;
 
     if (current > SCHEMA_VERSION) {
       throw new Error(
         `database schema v${current} is newer than this build (v${SCHEMA_VERSION}); refusing to downgrade`,
       );
     }
+    if (current === SCHEMA_VERSION) return;
 
-    await sql.exec(SCHEMA_SQL);
+    for (const step of MIGRATIONS) {
+      if (step.version <= current) continue;
+      await sql.exec(step.sql);
+      log.info('applied migration', { version: step.version, name: step.name });
+    }
+
     await sql.query(
       `INSERT INTO schema_meta (key, value) VALUES ('version', $1)
        ON CONFLICT (key) DO UPDATE SET value = excluded.value`,

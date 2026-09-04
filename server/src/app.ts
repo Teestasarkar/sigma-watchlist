@@ -13,6 +13,7 @@ import { createSqlClient, type SqlClient } from './db/sql.js';
 import { migrate } from './db/migrate.js';
 import { MarketRepo } from './db/marketRepo.js';
 import { UserRepo } from './db/userRepo.js';
+import { AuthRepo } from './db/authRepo.js';
 import { SignalRepo } from './db/signalRepo.js';
 import { IngestRepo } from './db/ingestRepo.js';
 import {
@@ -28,6 +29,7 @@ import { FinnhubProvider } from './providers/finnhub.js';
 import { ProviderRegistry } from './providers/registry.js';
 import type { MarketDataProvider } from './providers/types.js';
 import { ALL_ENTRIES, BENCHMARK, STARTER_SYMBOLS } from './providers/universe.js';
+import { hashPassword } from './infra/password.js';
 import { DetectionEngine, thresholdsFromConfig } from './services/detection.js';
 import { IngestService } from './services/ingest.js';
 import { ViewService } from './services/view.js';
@@ -44,6 +46,7 @@ export interface App {
 
   market: MarketRepo;
   users: UserRepo;
+  auth: AuthRepo;
   signals: SignalRepo;
   jobs: IngestRepo;
 
@@ -111,6 +114,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
 
   const market = new MarketRepo(sql, marketClock);
   const users = new UserRepo(sql);
+  const auth = new AuthRepo(sql);
   const signals = new SignalRepo(sql);
   const jobs = new IngestRepo(sql);
 
@@ -129,7 +133,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     minBarsForStats: config.signals.minBarsForStats,
   });
 
-  const scheduler = new Scheduler(jobs, signals, ingest, marketClock, clock, {
+  const scheduler = new Scheduler(jobs, signals, auth, ingest, marketClock, clock, {
     tickMs: config.ingest.tickMs,
     batchSize: config.ingest.batchSize,
     hotIntervalMs: config.ingest.hotIntervalMs,
@@ -149,6 +153,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     faults,
     market,
     users,
+    auth,
     signals,
     jobs,
     registry,
@@ -284,11 +289,32 @@ function buildProviders(
  * starter list deliberately mixes volatility regimes so the sigma-normalised
  * ranking has something to prove.
  */
+/**
+ * A ready-to-explore account with a published password.
+ *
+ * A watchlist product with an empty watchlist demonstrates nothing, and asking
+ * a reviewer to register before seeing the point is a poor trade. The
+ * credentials are deliberately not a secret - see config.demoPassword.
+ */
 async function ensureDemoUser(app: App, now: number): Promise<void> {
-  const existing = await app.users.findUserByHandle('demo');
-  if (existing) return;
+  const existing = await app.auth.findAccount('demo');
 
-  const user = await app.users.createUser('demo', now);
+  if (existing) {
+    // An account created before passwords existed cannot log in. Give it one
+    // rather than leaving a dead row that silently refuses every attempt.
+    if (!existing.passwordHash) {
+      await app.auth.setPassword(existing.id, await hashPassword(app.config.demoPassword), now);
+      log.info('demo account given a password');
+    }
+    return;
+  }
+
+  const user = await app.auth.createAccount(
+    'demo',
+    await hashPassword(app.config.demoPassword),
+    now,
+  );
+
   const list = await app.users.createWatchlist(
     user.id,
     'My Watchlist',

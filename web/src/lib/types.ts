@@ -251,3 +251,22 @@ export interface Diagnostics {
     lastOkAgoMs: number | null;
   }>;
 }
+
+export interface AuthPolicy {
+  minPasswordLength: number;
+  maxPasswordLength: number;
+  handlePattern: string;
+  sessionTtlMs: number;
+  /** Published deliberately when dev tools are on; null otherwise. */
+  demo: { handle: string; password: string } | null;
+}
+
+export interface SessionSummary {
+  /** Last six characters of the token - enough to identify, useless if seen. */
+  id: string;
+  current: boolean;
+  createdAt: number;
+  lastSeenAt: number;
+  expiresAt: number | null;
+  userAgent: string | null;
+}

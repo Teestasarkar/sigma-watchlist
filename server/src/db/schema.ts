@@ -24,9 +24,9 @@
  *     disjoint batches without coordination.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
-export const SCHEMA_SQL = `
+export const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS schema_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -264,3 +264,45 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency_keys(created_at);
 `;
+
+/**
+ * v2 — real credentials.
+ *
+ * Additive and idempotent (`ADD COLUMN IF NOT EXISTS`), so it can be applied to
+ * a database that already holds data. Existing rows get a NULL
+ * `password_hash`, which cannot authenticate - correct, since those accounts
+ * never had a password. Bootstrap sets one for the demo account.
+ */
+export const SCHEMA_V2 = `
+-- Credentials. NULL means the account predates passwords and cannot log in.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+
+-- Login throttling, stored rather than held in memory so a lockout survives a
+-- restart and applies across every instance. An in-memory counter is defeated
+-- by waiting for a deploy, or by hitting a different replica.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_logins INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until BIGINT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at BIGINT;
+
+-- Sessions get a real lifetime and enough provenance to be recognisable in a
+-- "signed-in devices" list. A token that never expires is a token that leaks.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at BIGINT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+`;
+
+/**
+ * Migrations, applied in order.
+ *
+ * Stepped rather than "run one big idempotent script", because v2 alters
+ * existing tables - a single `CREATE TABLE IF NOT EXISTS` file cannot express
+ * that. Each step runs once, inside the same transaction that records the new
+ * version, so a failure leaves the database on the previous version rather
+ * than half-migrated.
+ */
+export const MIGRATIONS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
+  { version: 1, name: 'initial', sql: SCHEMA_V1 },
+  { version: 2, name: 'credentials', sql: SCHEMA_V2 },
+];

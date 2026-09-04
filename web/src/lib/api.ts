@@ -10,9 +10,11 @@
  */
 
 import type {
+  AuthPolicy,
   Diagnostics,
   Digest,
   Meta,
+  SessionSummary,
   SymbolDetail,
   User,
   WatchRow,
@@ -137,19 +139,65 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 // ─────────────────────────────────────────────────────────── endpoints
 
 export const api = {
-  async signIn(handle = 'demo'): Promise<{ user: User; isNew: boolean }> {
-    const res = await request<{ token: string; user: User; isNew?: boolean }>('/api/session', {
+  /** Password requirements and, in demo mode, the demo credentials. */
+  authPolicy: () => request<AuthPolicy>('/api/auth/policy'),
+
+  async login(handle: string, password: string): Promise<{ user: User; isNew: boolean }> {
+    const res = await request<{ token: string; user: User; isNew: boolean }>('/api/auth/login', {
       method: 'POST',
-      body: { handle },
+      body: { handle, password },
       idempotent: false,
     });
     storeToken(res.token);
-    return { user: res.user, isNew: res.isNew === true };
+    return { user: res.user, isNew: res.isNew };
   },
 
-  signOut(): void {
+  async register(handle: string, password: string): Promise<{ user: User; isNew: boolean }> {
+    const res = await request<{ token: string; user: User; isNew: boolean }>('/api/auth/register', {
+      method: 'POST',
+      body: { handle, password },
+      idempotent: false,
+    });
+    storeToken(res.token);
+    return { user: res.user, isNew: res.isNew };
+  },
+
+  /**
+   * Sign out.
+   *
+   * Revokes the token server-side as well as forgetting it locally - dropping
+   * it from localStorage alone would leave a valid session alive until it
+   * expired, which is not what anyone means by "sign out".
+   */
+  async signOut(): Promise<void> {
+    try {
+      await request('/api/auth/logout', { method: 'POST', body: {}, idempotent: false });
+    } catch {
+      // Best effort. Even if the call fails, forget the token locally.
+    }
     storeToken(null);
   },
+
+  /** Forget the token without calling the server. For an already-dead session. */
+  forgetToken(): void {
+    storeToken(null);
+  },
+
+  signOutEverywhere: () =>
+    request<{ revoked: number }>('/api/auth/logout-all', {
+      method: 'POST',
+      body: {},
+      idempotent: false,
+    }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ changed: boolean; otherSessionsRevoked: number }>('/api/auth/password', {
+      method: 'POST',
+      body: { currentPassword, newPassword },
+      idempotent: false,
+    }),
+
+  sessions: () => request<{ sessions: SessionSummary[] }>('/api/auth/sessions'),
 
   me: () =>
     request<{ user: User; watchlists: Watchlist[]; lastCheckedAt: number | null }>('/api/me'),

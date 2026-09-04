@@ -88,7 +88,7 @@ export default function App(): React.JSX.Element {
         // The session went away underneath us. Return to sign-in rather than
         // quietly adopting a different identity, which would be worse: the
         // user would be looking at someone else's checkpoint.
-        api.signOut();
+        api.forgetToken();
         setUser(null);
         setDigest(null);
         setRows([]);
@@ -130,7 +130,7 @@ export default function App(): React.JSX.Element {
             await loadForUser();
           } else {
             // The token is stale or revoked. Drop it and ask who they are.
-            api.signOut();
+            api.forgetToken();
           }
         }
       } catch (err) {
@@ -328,7 +328,8 @@ export default function App(): React.JSX.Element {
   };
 
   const signOut = (): void => {
-    api.signOut();
+    // Revoke server-side too, then clear locally regardless of the outcome.
+    void api.signOut();
     setUser(null);
     setDigest(null);
     setRows([]);

@@ -23,11 +23,17 @@ import { AllProvidersFailedError } from '../providers/registry.js';
 import { SymbolNotFoundError } from '../providers/types.js';
 import { TokenBucket } from '../infra/resilience.js';
 import { createLogger } from '../infra/logger.js';
+import { registerAuthRoutes } from './routes/auth.js';
 import { registerCoreRoutes } from './routes/core.js';
 import { registerOpsRoutes } from './routes/ops.js';
 import type { User } from '../domain/types.js';
 
 const log = createLogger('http');
+
+/** Must match auth.ts. Sessions live 30 days. */
+const SESSION_TTL_MS = 30 * 24 * 3600_000;
+/** Slide the expiry once a session is inside its final 15 days. */
+const SESSION_SLIDE_AFTER_MS = 15 * 24 * 3600_000;
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -40,12 +46,20 @@ export interface ServerDeps {
   app: App;
 }
 
-/** Public routes, which need no bearer token. */
+/**
+ * Routes that need no bearer token.
+ *
+ * Kept as an explicit allow-list rather than a deny-list, so a new route is
+ * private by default. Forgetting to protect a route should be impossible;
+ * forgetting to *un*protect one is merely annoying.
+ */
 const PUBLIC_PATHS = new Set([
   '/api/health',
-  '/api/session',
-  '/api/session/demo',
   '/api/meta',
+  '/api/auth/login',
+  '/api/auth/register',
+  '/api/auth/logout',
+  '/api/auth/policy',
 ]);
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -169,10 +183,23 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
     if (!token) throw unauthorized('missing bearer token');
 
-    const user = await app.users.resolveSession(token, app.clock.now());
-    if (!user) throw unauthorized('session not recognised');
+    /*
+     * Resolve through AuthRepo, which refuses expired sessions. A token that
+     * never expires is a token that leaks - so every session carries a
+     * lifetime, and using one slides it forward rather than making people log
+     * in again mid-session.
+     */
+    const now = app.clock.now();
+    const user = await app.auth.resolveSession(token, now);
+    if (!user) throw unauthorized('Your session has expired. Please sign in again.');
 
-    req.currentUser = user;
+    req.currentUser = { id: user.id, handle: user.handle, createdAt: user.createdAt };
+
+    // Slide the expiry when a session is more than halfway through its life,
+    // so an active user is never logged out, without writing on every request.
+    if (user.expiresAt !== null && user.expiresAt - now < SESSION_SLIDE_AFTER_MS) {
+      void app.auth.slideExpiry(token, now, SESSION_TTL_MS).catch(() => undefined);
+    }
   });
 
   // ── Error translation ───────────────────────────────────────────────
@@ -202,6 +229,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
 
   // ── Routes ──────────────────────────────────────────────────────────
+  await registerAuthRoutes(fastify, app);
   await registerCoreRoutes(fastify, app);
   await registerOpsRoutes(fastify, app);
 

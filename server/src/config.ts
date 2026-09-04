@@ -158,6 +158,16 @@ export const config = {
 
   /** Enables the /api/dev/* fault-injection endpoints used by the demo panel. */
   devTools: bool(process.env.DEV_TOOLS, true),
+
+  /**
+   * Password for the seeded `demo` account.
+   *
+   * Published deliberately - it exists so a reviewer can look around without
+   * registering, and a demo account with a secret password is not a demo
+   * account. Override it (or set DEV_TOOLS=0, which stops it being advertised)
+   * for any deployment where that is not the intent.
+   */
+  demoPassword: process.env.DEMO_PASSWORD ?? 'sigma-demo-2026',
 } as const;
 
 export type Config = typeof config;

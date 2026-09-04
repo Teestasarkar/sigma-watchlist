@@ -25,6 +25,7 @@
 
 import type { IngestRepo, Job, Tier } from '../db/ingestRepo.js';
 import type { SignalRepo } from '../db/signalRepo.js';
+import type { AuthRepo } from '../db/authRepo.js';
 import type { MarketClock } from '../domain/marketClock.js';
 import type { IngestService } from '../services/ingest.js';
 import type { Clock } from '../infra/clock.js';
@@ -75,6 +76,7 @@ export class Scheduler {
   constructor(
     private readonly jobs: IngestRepo,
     private readonly signals: SignalRepo,
+    private readonly auth: AuthRepo,
     private readonly ingest: IngestService,
     private readonly marketClock: MarketClock,
     private readonly clock: Clock,
@@ -231,7 +233,12 @@ export class Scheduler {
         this.marketClock.sessionsAgo(now, this.opts.retentionSessions),
       );
       const idem = await this.jobs.pruneIdempotent(now - 24 * 3600_000);
-      if (pruned > 0 || idem > 0) log.debug('pruned', { signals: pruned, idempotency: idem });
+      // Expired sessions are already refused at the auth hook; this only stops
+      // the table growing without bound.
+      const sessions = await this.auth.pruneExpiredSessions(now);
+      if (pruned > 0 || idem > 0 || sessions > 0) {
+        log.debug('pruned', { signals: pruned, idempotency: idem, sessions });
+      }
     } catch (err) {
       log.error('sweep failed', { err: err instanceof Error ? err.message : String(err) });
     }
