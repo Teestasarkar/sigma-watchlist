@@ -13,7 +13,11 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Generous on purpose. The password tests run real scrypt at production
+    # cost (N=65536) rather than a weakened test parameter, because a hash
+    # tested at a cheaper setting is not the hash that ships. That is ~3
+    # minutes locally and slower on a shared runner.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
