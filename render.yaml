@@ -10,7 +10,12 @@ services:
     runtime: node
     plan: free
     region: oregon
-    buildCommand: npm ci && npm run build
+    # `--include=dev` is load-bearing. NODE_ENV=production is set below for the
+    # runtime, and npm honours it during install too - so a plain `npm ci`
+    # skips devDependencies, which is where tsc, vite and @types/node live. The
+    # build then fails with a few hundred "Cannot find name 'process'" errors
+    # that look like a tsconfig problem and are not.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     # Render restarts the instance if this stops answering. It returns 200 only
     # when the database actually responds, so a broken instance is taken out of
