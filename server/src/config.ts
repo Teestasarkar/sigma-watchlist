@@ -46,7 +46,8 @@ export const config = {
      * simulator's compressed grid), so ordering is not cosmetic.
      *
      *   PROVIDERS=yahoo             live prices, no key required
-     *   PROVIDERS=yahoo,finnhub     two live sources, real reconciliation
+     *   PROVIDERS=yahoo,cnbc        two live sources, no key required
+     *   PROVIDERS=yahoo,finnhub     two live sources, needs a Finnhub key
      *   PROVIDERS=synthetic         deterministic, always-moving demo
      *
      * Live and simulated feeds cannot be mixed - they describe different
@@ -54,7 +55,7 @@ export const config = {
      * report a permanent 47% disagreement. Whichever kind is listed first
      * wins and the other is dropped with a warning; see buildProviders.
      */
-    enabled: list(process.env.PROVIDERS, ['yahoo']),
+    enabled: list(process.env.PROVIDERS, ['yahoo', 'cnbc']),
     finnhubKey: process.env.FINNHUB_API_KEY ?? '',
     alphaVantageKey: process.env.ALPHAVANTAGE_API_KEY ?? '',
     /** Synthetic feed seed — the same seed produces the same market, every run. */

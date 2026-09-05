@@ -26,6 +26,7 @@ import { createLogger } from './infra/logger.js';
 import { createFaultState, type FaultState } from './providers/faults.js';
 import { SyntheticProvider } from './providers/synthetic.js';
 import { YahooProvider } from './providers/yahoo.js';
+import { CnbcProvider } from './providers/cnbc.js';
 import { FinnhubProvider } from './providers/finnhub.js';
 import { ProviderRegistry } from './providers/registry.js';
 import type { MarketDataProvider } from './providers/types.js';
@@ -283,7 +284,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
 }
 
 /** Providers that produce prices for the *real* market. */
-const LIVE_PROVIDERS = new Set(['yahoo', 'finnhub']);
+const LIVE_PROVIDERS = new Set(['yahoo', 'cnbc', 'finnhub']);
 /** Providers that produce prices for a simulated market. */
 const SIMULATED_PROVIDERS = new Set(['synthetic', 'synthetic-alt']);
 
@@ -376,6 +377,17 @@ function buildProviders(
          * ordering in PROVIDERS are for.
          */
         providers.push(new YahooProvider(marketClock, clock));
+        break;
+      }
+
+      case 'cnbc': {
+        /*
+         * The second live feed, and the reason cross-vendor reconciliation
+         * is demonstrable rather than theoretical. Also keyless, also
+         * undocumented. Quotes only - see the provider header for why its
+         * history is deliberately not merged with Yahoo's.
+         */
+        providers.push(new CnbcProvider(marketClock, clock));
         break;
       }
 
