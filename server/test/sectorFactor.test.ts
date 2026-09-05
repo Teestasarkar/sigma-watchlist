@@ -14,6 +14,21 @@
 import { describe, expect, it } from 'vitest';
 
 import { attribute, regress, regress2 } from '../src/domain/stats.js';
+import { buildApp } from '../src/app.js';
+import { config as baseConfig } from '../src/config.js';
+import { ManualClock } from '../src/infra/clock.js';
+
+const clock = new ManualClock(Date.now());
+
+/** The simulator, so this suite needs no network. */
+const config = {
+  ...baseConfig,
+  databaseUrl: '',
+  ingest: { ...baseConfig.ingest, enabled: false },
+  replay: { ...baseConfig.replay, enabled: false },
+  providers: { ...baseConfig.providers, enabled: ['synthetic'], syntheticSessionMs: 60_000 },
+} as typeof baseConfig;
+
 
 /**
  * Deterministic PRNG (mulberry32), so a failure is reproducible.
@@ -309,4 +324,39 @@ describe('what this changes for a user', () => {
 
     expect(parts.idiosyncratic).toBeCloseTo(-0.06, 10);
   });
+});
+
+describe('the sector proxies stay in the poll queue', () => {
+  /*
+   * The bug this prevents, found only by deploying.
+   *
+   * A proxy is not in anyone's watchlist and is not the benchmark, so the
+   * sweep's orphan query classified all nine as abandoned and deleted their
+   * poll jobs. They kept their history - so `betaSector` still fitted, and
+   * every statistic looked correct - but they never got a *live quote*, so at
+   * detection time there was no sector return to attribute and every signal
+   * silently fell back to the single-factor model.
+   *
+   * Nothing errored. The only visible trace was `sectorSymbol: null` in the
+   * evidence of a signal whose stats clearly knew its sector beta.
+   */
+  it('polls them, and does not treat them as orphans', async () => {
+    const app = await buildApp({ config, clock, inMemory: true });
+    try {
+      await app.bootstrap();
+
+      const proxies = await app.market.getSectorProxies();
+      expect(proxies.size).toBeGreaterThan(0);
+
+      const watched = new Set(await app.jobs.watchedSymbols());
+      const orphans = new Set(await app.jobs.orphanedJobSymbols());
+
+      for (const proxy of proxies.values()) {
+        expect(watched.has(proxy)).toBe(true);
+        expect(orphans.has(proxy)).toBe(false);
+      }
+    } finally {
+      await app.shutdown();
+    }
+  }, 180_000);
 });

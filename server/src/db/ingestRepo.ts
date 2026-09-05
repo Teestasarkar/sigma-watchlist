@@ -199,6 +199,12 @@ export class IngestRepo {
       `SELECT symbol FROM watchlist_items
        UNION
        SELECT symbol FROM instruments WHERE is_benchmark
+       UNION
+       -- Sector proxies are machinery, not something anyone watches, but the
+       -- market-adjusted detectors need a *live quote* for them - not just
+       -- history. Leave them out and every signal falls back to the
+       -- single-factor model with no error anywhere to explain why.
+       SELECT symbol FROM instruments WHERE is_sector_proxy
        ORDER BY symbol`,
     );
     return rows.map((r) => r.symbol as string);
@@ -210,7 +216,9 @@ export class IngestRepo {
       `SELECT j.symbol FROM ingest_jobs j
        WHERE NOT EXISTS (SELECT 1 FROM watchlist_items i WHERE i.symbol = j.symbol)
          AND NOT EXISTS (
-           SELECT 1 FROM instruments n WHERE n.symbol = j.symbol AND n.is_benchmark
+           SELECT 1 FROM instruments n
+           WHERE n.symbol = j.symbol
+             AND (n.is_benchmark OR n.is_sector_proxy)
          )`,
     );
     return rows.map((r) => r.symbol as string);
