@@ -2,12 +2,26 @@
 
 **A watchlist that answers "should I care?" instead of "what's the price?"**
 
+### ▶ [sigma-watchlist.onrender.com](https://sigma-watchlist.onrender.com)
+
+Sign in with **`demo`** / **`sigma-demo-2026`**, or create your own account —
+watchlists, checkpoints and thresholds all belong to the account, so a second
+one is a genuinely separate view.
+
+> Running on a free instance that sleeps after ~15 minutes idle. If it is cold
+> the first load takes about 30 seconds while it wakes; everything after that
+> is immediate. It wakes with a gap in its history and backfills it, which is a
+> path worth watching — see [§ 6b in DECISIONS](docs/DECISIONS.md).
+
+Or run it locally, which needs nothing installed but Node:
+
 ```bash
 npm install && npm run dev     # → http://localhost:5173
 ```
 
 **Live market data, no API key, no database to install, no configuration.**
-It fetches real prices and a real year of history the moment it starts.
+It fetches real prices and a real year of history the moment it starts — from
+two independent vendors, so the reconciliation is real rather than theoretical.
 
 ---
 

@@ -32,9 +32,10 @@ jobs:
     steps:
       - name: Ping health endpoint
         env:
-          # Set this as a repository variable (Settings → Variables → Actions).
-          # Absent, the job no-ops rather than failing every ten minutes.
-          APP_URL: ${{ vars.APP_URL }}
+          # Defaults to the live deployment so this works on a fresh clone with
+          # no configuration. Override with a repository variable (Settings →
+          # Variables → Actions) to point it at your own instance.
+          APP_URL: ${{ vars.APP_URL || 'https://sigma-watchlist.onrender.com' }}
         run: |
           if [ -z "$APP_URL" ]; then
             echo "APP_URL is not set; nothing to keep warm."
