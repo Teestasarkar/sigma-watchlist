@@ -305,8 +305,13 @@ describe('an open stream', () => {
     await server2.close();
     const took = Date.now() - started;
 
-    // Before the preClose hook this never returned at all.
-    expect(took).toBeLessThan(5_000);
+    /*
+     * Before the preClose hook this never returned at all - the run died on
+     * the 180-second hook timeout. So the bound only has to separate
+     * "completes" from "hangs indefinitely"; it is not a benchmark, and a
+     * tight one just makes the suite fail on a busy machine instead.
+     */
+    expect(took).toBeLessThan(30_000);
     // And the client was told why, rather than just seeing the socket vanish.
     // The final chunk can still be in flight when close() returns, so wait for
     // it rather than reading the buffer at whatever instant we got here.

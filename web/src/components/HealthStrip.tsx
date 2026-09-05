@@ -23,13 +23,18 @@ export function HealthStrip({ health }: { health: DataHealth }): React.JSX.Eleme
     <div className={`health-strip${degraded ? ' is-degraded' : ''}`}>
       <FreshnessDot state={health.worstFreshness} label />
 
-      {!degraded ? (
-        <span>
-          {health.worstFreshness === 'closed'
-            ? 'Market closed · showing the last closing prices'
-            : 'All feeds healthy · prices current'}
-        </span>
-      ) : (
+      {/*
+        * Always say something in words.
+        *
+        * The dot alone is not an explanation. A state like `delayed` used to
+        * render a bare "Delayed" with no sentence beside it - during market
+        * hours, which is precisely when someone is deciding whether to act on
+        * the number next to it. Naming the state costs one line and removes
+        * the guessing.
+        */}
+      <span>{summarise(health.worstFreshness)}</span>
+
+      {degraded ? (
         <>
           {health.stale.length > 0 ? (
             <Chip tone="warn" title={health.stale.join(', ')}>
@@ -59,7 +64,7 @@ export function HealthStrip({ health }: { health: DataHealth }): React.JSX.Eleme
               </Chip>
             ))}
         </>
-      )}
+      ) : null}
 
       {health.thinHistory.length > 0 ? (
         <Chip tone="muted" title={health.thinHistory.join(', ')}>
@@ -72,4 +77,27 @@ export function HealthStrip({ health }: { health: DataHealth }): React.JSX.Eleme
       </span>
     </div>
   );
+}
+
+/**
+ * One plain sentence per data state.
+ *
+ * Deliberately not alarming for `closed`: the market being shut is not a
+ * fault, and a closing price during a closed market is the current price, not
+ * a stale one. Everything else says what is wrong in the user's terms rather
+ * than in the engine's.
+ */
+function summarise(freshness: DataHealth['worstFreshness']): string {
+  switch (freshness) {
+    case 'fresh':
+      return 'All feeds healthy · prices current';
+    case 'closed':
+      return 'Market closed · showing the last closing prices';
+    case 'delayed':
+      return 'Prices are a few minutes behind';
+    case 'stale':
+      return 'Some prices could not be refreshed';
+    default:
+      return 'No usable price for some instruments';
+  }
 }
