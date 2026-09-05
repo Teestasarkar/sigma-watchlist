@@ -277,6 +277,24 @@ export const api = {
 
   diagnostics: () => request<Diagnostics>('/api/ops/diagnostics'),
 
+  // ── the live stream ────────────────────────────────────
+
+  /**
+   * Trade the session token for a nonce that is safe to put in a URL.
+   *
+   * `EventSource` cannot send an Authorization header, so the credential has
+   * to travel in the query string - where it lands in proxy logs and browser
+   * history. The ticket expires in thirty seconds and works once.
+   */
+  streamTicket: () =>
+    request<{ ticket: string; expiresInMs: number }>('/api/stream/ticket', {
+      method: 'POST',
+      idempotent: false,
+    }),
+
+  /** Absolute, because EventSource does not inherit the client's base path. */
+  streamUrl: (params: URLSearchParams): string => `${BASE}/api/stream?${params.toString()}`,
+
   // ── the demo controls ──────────────────────────────────────────────
   dev: {
     faults: (patch: Record<string, unknown>) =>

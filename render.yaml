@@ -39,11 +39,12 @@ services:
       # to remove those routes entirely.
       - key: DEV_TOOLS
         value: "1"
-      # Live market data. No API key required.
-      # Add FINNHUB_API_KEY and use "yahoo,finnhub" for real two-source
-      # reconciliation; use "synthetic" for the deterministic simulator.
+      # Two independent live vendors, neither needing an API key. With one
+      # provider the reconciliation code never executes - no median, no
+      # spread, no confidence penalty - so the default runs both.
+      # Use "synthetic" for the deterministic simulator.
       - key: PROVIDERS
-        value: yahoo
+        value: yahoo,cnbc
       # Published on purpose - a demo account with a secret password is not a
       # demo account. Override for any deployment where that is not intended.
       - key: DEMO_PASSWORD

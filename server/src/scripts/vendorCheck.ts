@@ -10,7 +10,7 @@
 
 import { exchangeClock } from '../domain/marketClock.js';
 import { systemClock } from '../infra/clock.js';
-import { reconcileQuotes } from '../providers/reconcile.js';
+import { classifyFreshness, reconcileQuotes } from '../providers/reconcile.js';
 import { YahooProvider } from '../providers/yahoo.js';
 import { CnbcProvider } from '../providers/cnbc.js';
 import type { MarketDataProvider } from '../providers/types.js';
@@ -63,11 +63,20 @@ for (const symbol of symbols) {
     continue;
   }
 
-  const spread = quote.conflict ? `${(quote.conflict.spread * 100).toFixed(3)}%` : 'within tolerance';
+  const spread = quote.conflict
+    ? `${(quote.conflict.spread * 100).toFixed(3)}%`
+    : 'within tolerance';
+  const freshness = classifyFreshness(quote.asOf, now, {
+    freshMs: 120_000,
+    delayedMs: 900_000,
+    staleMs: 3_600_000,
+    marketOpen,
+    lastSessionCloseAt: lastClose,
+  });
   console.log(
     `  → ${quote.price.toFixed(2)} via ${quote.source}` +
       `  ·  spread ${spread}` +
-      `  ·  ${quote.freshness ?? classify(quote.confidence)}` +
+      `  ·  ${freshness}` +
       `  ·  confidence ${quote.confidence.toFixed(3)}\n`,
   );
 }
@@ -78,8 +87,4 @@ function pad(s: string): string {
 
 function iso(ts: number): string {
   return new Date(ts).toISOString().replace('.000Z', 'Z');
-}
-
-function classify(c: number): string {
-  return c >= 0.95 ? 'clean' : c >= 0.7 ? 'discounted' : 'doubtful';
 }

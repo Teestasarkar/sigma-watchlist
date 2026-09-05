@@ -346,6 +346,99 @@ demo account.
 
 ---
 
+## 13. Two live vendors, because one makes reconciliation dead code
+
+The registry reconciles disagreeing sources: it takes the **median** rather
+than the freshest, records the spread, and lets a disagreement lower the
+quote's confidence. With a single provider none of that ever executes. The
+median is never taken, the spread is always zero, the penalty never fires.
+
+Every second vendor I looked at wanted an API key, which turns "watch two feeds
+disagree" into something a reader has to go and arrange before they can see it.
+CNBC's public quote service needs none and is genuinely independent of Yahoo:
+different vendor, different consolidator, different rounding. So the default is
+now `PROVIDERS=yahoo,cnbc` and reconciliation is live on first run.
+
+Two things about it needed care.
+
+**Quotes only; history stays with Yahoo.** Merging two vendors' bar series
+means reconciling different split-adjustment conventions and session
+boundaries. Getting that subtly wrong corrupts every volatility estimate — the
+number this entire product rests on. One coherent history beats two blended
+ones, so `capabilities.history` is `false` and the registry skips it.
+
+**The timestamp was a trap.** CNBC reports a session *date* and no time,
+anywhere, including its extended-hours block. The obvious shortcut is to stamp
+the quote with our own receive time. That would have been invisible and
+actively harmful: `reconcileQuotes` takes the newest `asOf` across sources, so
+a receive-time stamp wins every comparison and pins freshness to `fresh`
+permanently. All weekend — exchange shut, Yahoo correctly reporting Friday's
+close — the quote would claim to be seconds old, silently disabling the
+`closed` state (§ 6a) and the stale-data detector with it. Instead the date is
+mapped to that session's closing bell, clamped to now so a live session cannot
+produce a future timestamp. During an open session that does degrade to receive
+time; CNBC gives us nothing better, and it is why Yahoo stays preferred.
+
+The endpoint also batches, and a refresh cycle asks for a dozen symbols within
+milliseconds, so the provider coalesces them into one request. In a live run
+that showed as 33 Yahoo requests against 6 CNBC ones for the same work.
+
+`npx tsx src/scripts/vendorCheck.ts AAPL MSFT NVDA` prints both feeds, the
+spread, and the resulting confidence.
+
+---
+
+## 14. Push, but polling never goes away
+
+Polling every 8 seconds was always an awkward fit for a product arguing "you
+shouldn't have to keep looking" — it just moves the looking into the browser.
+The server now pushes over SSE.
+
+**Server-sent events, not WebSockets.** The traffic is strictly one-way; the
+client has nothing to say that an ordinary POST cannot carry. SSE gets
+reconnection, backoff and `Last-Event-ID` resume from the browser for free,
+over plain HTTP/1.1 that every proxy already understands.
+
+**Events are global and carry no data.** An event says "AAPL moved", never
+"your watchlist changed". That is the same split the rest of the system runs on
+(§ 1): detection once per symbol, personalisation at read time. So one event
+serves every subscriber to that symbol and broadcast cost scales with
+*instruments*, not users. A subscriber that hears the news re-reads the
+ordinary REST endpoint — one extra round trip, in exchange for a single
+serialisation path that cannot drift from the one everyone else uses.
+
+**Bursts are coalesced.** The scheduler refreshes in batches, so a naive bus
+emits a dozen events in a millisecond and every client refetches a dozen times
+— strictly worse than the polling it replaces. Publishes are merged into one
+event per 250ms window.
+
+**Polling never stops.** It drops to a two-minute heartbeat while the stream is
+healthy and returns to 8s the moment it is not. The dangerous failure is not a
+stream that errors — the browser reports those — it is one that stays open and
+silent behind a proxy that decided to buffer it. The heartbeat puts a ceiling
+on how long a screen can be wrong. The header says which mode it is in, because
+a user deciding whether to act on a number is entitled to know.
+
+**A gap is admitted, not hidden.** If a reconnecting client asks from a
+sequence older than the retained buffer, the server sends `resync` and the
+client reloads. Quietly sending nothing would leave it displaying stale data
+with full confidence — which would be a rich failure for *this* product to
+commit.
+
+**The credential is not the session token.** `EventSource` cannot set headers,
+so whatever authenticates the stream lands in a URL — and URLs land in proxy
+logs, browser history and `Referer`. The session is exchanged over a normal
+authenticated POST for a nonce that expires in 30 seconds and works once.
+
+**Shutdown had to be taught to end streams.** `fastify.close()` waits for
+in-flight requests, and an SSE response never finishes by design — so one
+connected browser turned a graceful restart into a hang. A `preClose` hook ends
+open streams with a `bye` frame first, so clients back off deliberately instead
+of stampeding a server that is going away. The test suite found this, not
+production.
+
+---
+
 ## 11. No state-management library on the frontend
 
 **Decision.** `useState`, one `load()` function, a 20-line hash router.
@@ -373,10 +466,6 @@ server state, or when optimistic updates need rollback across views.
 Each of these was considered and consciously dropped, which is different from
 not having thought of it.
 
-- **WebSockets.** The read path polls every 8s while visible. Push would be
-  genuinely better for a trading tool and is the wrong first optimisation for a
-  product whose whole thesis is that you check it *periodically*, not
-  continuously. It would also not survive a free host that sleeps.
 - **A charting library.** The sparkline is ~120 lines of hand-rolled SVG
   because the one thing it must do — shade the period since *your* checkpoint —
   is exactly what a generic library will not do, and everything else at that
@@ -384,14 +473,9 @@ not having thought of it.
 - **Multi-currency.** Every instrument is USD. The `currency` column exists;
   FX-adjusted returns do not. Doing it properly needs an FX feed and a
   decision about which currency significance is measured in.
-- **Corporate actions.** A 2-for-1 split currently reads as a −50% move. Real
-  deployment needs an adjustment feed. This is the most serious remaining
-  correctness gap and I would fix it before showing this to anyone with money
-  at stake.
-- **A second live vendor by default.** Cross-vendor reconciliation is
-  implemented and works, but a second vendor needs an API key, so the
-  default is one live source. `PROVIDERS=yahoo,finnhub` with a Finnhub key
-  turns it on.
+- **WebSockets.** There *is* live push now (§ 14), but over server-sent
+  events. The traffic is one-way, so a WebSocket would mean hand-rolling
+  reconnection, backoff and resume to replace what `EventSource` already does.
 - **A CSS framework.** ~900 lines of hand-written CSS with design tokens.
   Tailwind would have been faster to type and would have put the design
   decisions in the markup, where they are harder to keep coherent.

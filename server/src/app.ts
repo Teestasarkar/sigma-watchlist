@@ -39,6 +39,7 @@ import { ActionsRepo } from './db/actionsRepo.js';
 import { ViewService } from './services/view.js';
 import { ReplayService } from './services/replay.js';
 import { Scheduler } from './ingest/scheduler.js';
+import { MarketEventBus } from './services/events.js';
 
 const log = createLogger('app');
 
@@ -62,6 +63,8 @@ export interface App {
   replay: ReplayService;
   view: ViewService;
   scheduler: Scheduler;
+  /** Broadcasts 'something moved' to connected browsers. */
+  events: MarketEventBus;
 
   /** Ensure the universe, benchmark and a demo account exist. */
   bootstrap(): Promise<void>;
@@ -148,12 +151,23 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     config.providers.historySessions,
   );
 
+  /*
+   * The change bus.
+   *
+   * Constructed before ingest because ingest publishes to it. Nothing
+   * subscribes until a browser connects, and publishing with no
+   * subscribers is a no-op - so this costs nothing when unused.
+   */
+  const events = new MarketEventBus(clock, { coalesceMs: config.ingest.eventCoalesceMs });
+
   const ingest = new IngestService(
+
     registry,
     market,
     jobs,
     detection,
     corporateActions,
+    events,
     marketClock,
     {
     historySessions: config.providers.historySessions,
@@ -204,6 +218,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     replay,
     view,
     scheduler,
+    events,
 
     async bootstrap() {
       const now = clock.now();
@@ -275,6 +290,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     },
 
     async shutdown() {
+      events.stop();
       await scheduler.stop();
       await sql.close();
     },

@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, getToken } from './lib/api.js';
+import { connectStream, type StreamStatus } from './lib/stream.js';
 import type { Digest, Meta, User, WatchRow, Watchlist } from './lib/types.js';
 import { Briefing } from './components/Briefing.js';
 import { WatchTable } from './components/WatchTable.js';
@@ -40,7 +41,17 @@ function parseHash(): View {
   return { name: 'briefing' };
 }
 
+/**
+ * Poll cadence.
+ *
+ * `POLL_MS` is the fallback: the stream is down, or the browser never managed
+ * to open it. `IDLE_POLL_MS` is the safety net that keeps running *underneath*
+ * a healthy stream - because a stream that dies quietly, without an error the
+ * browser reports, is the one failure mode that would leave a user staring at
+ * a frozen screen believing it was live.
+ */
 const POLL_MS = 8000;
+const IDLE_POLL_MS = 120_000;
 
 export default function App(): React.JSX.Element {
   const [view, setView] = useState<View>(parseHash);
@@ -55,9 +66,26 @@ export default function App(): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [busySymbols, setBusySymbols] = useState<Set<string>>(new Set());
   const [canUndo, setCanUndo] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>('connecting');
 
   // Guards against a slow response from a previous view overwriting a newer one.
   const loadSeq = useRef(0);
+  /*
+   * `load` in a ref, so the stream subscription does not tear down and
+   * reconnect every time the callback identity changes. Reconnecting on every
+   * render would defeat the point and hammer the ticket endpoint.
+   */
+  const loadRef = useRef<() => Promise<void>>(async () => undefined);
+  /*
+   * The symbols this user actually watches.
+   *
+   * The server broadcasts per *symbol*, not per user - detection runs once and
+   * personalisation happens at read time, and the stream mirrors that split so
+   * one event serves every subscriber. The filtering therefore happens here.
+   * Without it, a busy instrument nobody in this browser cares about would
+   * trigger a refetch on every tick.
+   */
+  const watchedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const onHash = (): void => setView(parseHash());
@@ -97,6 +125,14 @@ export default function App(): React.JSX.Element {
       setError(err instanceof Error ? err.message : 'could not load your watchlist');
     }
   }, []);
+
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
+
+  useEffect(() => {
+    watchedRef.current = new Set(rows.map((r) => r.symbol));
+  }, [rows]);
 
   /**
    * Load everything that belongs to the signed-in user.
@@ -142,6 +178,39 @@ export default function App(): React.JSX.Element {
   }, [loadForUser]);
 
   /**
+   * The live stream.
+   *
+   * Opened once per signed-in session and deliberately *not* torn down when
+   * the tab is hidden - the connection is idle-cheap, and holding it means
+   * returning to the tab shows current data instead of a spinner. Polling is
+   * what pauses on hide, because polling is what costs something.
+   */
+  useEffect(() => {
+    if (booting || !user) return;
+
+    const disconnect = connectStream({
+      onStatus: setStreamStatus,
+
+      onEvent: (event) => {
+        const watched = watchedRef.current;
+        // A new signal is worth interrupting for even on a symbol whose price
+        // did not move; a price change on something we do not hold is not.
+        const relevant =
+          event.signals.some((sym) => watched.has(sym)) ||
+          event.quotes.some((sym) => watched.has(sym));
+        if (relevant) void loadRef.current();
+      },
+
+      // The server could not prove what we missed. Reload rather than carry
+      // on: showing stale numbers confidently is the failure this app exists
+      // to prevent, and it would be especially rich to commit it ourselves.
+      onResync: () => void loadRef.current(),
+    });
+
+    return disconnect;
+  }, [booting, user]);
+
+  /**
    * Poll, but only while the tab is visible.
    *
    * The listener also fires an immediate refresh on becoming visible, so
@@ -153,13 +222,23 @@ export default function App(): React.JSX.Element {
 
     let timer: number | undefined;
 
+    /*
+     * Back right off while the stream is healthy, but never stop.
+     *
+     * The dangerous failure is not a stream that errors - the browser tells us
+     * about those. It is one that stays open and silent behind a proxy that
+     * decided to buffer us. A two-minute heartbeat costs almost nothing and
+     * puts a ceiling on how long a screen can be wrong.
+     */
+    const intervalMs = streamStatus === 'live' ? IDLE_POLL_MS : POLL_MS;
+
     const tick = (): void => {
       if (document.visibilityState === 'visible') void load();
     };
 
     const start = (): void => {
       stop();
-      timer = window.setInterval(tick, POLL_MS);
+      timer = window.setInterval(tick, intervalMs);
     };
     const stop = (): void => {
       if (timer !== undefined) window.clearInterval(timer);
@@ -182,7 +261,7 @@ export default function App(): React.JSX.Element {
       stop();
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [booting, load]);
+  }, [booting, load, streamStatus]);
 
   const flash = (message: string): void => {
     setNotice(message);
@@ -344,7 +423,15 @@ export default function App(): React.JSX.Element {
   if (booting) {
     return (
       <div className="app">
-        <Header view={view} navigate={navigate} unread={0} meta={null} user={null} onSignOut={signOut} />
+        <Header
+          view={view}
+          navigate={navigate}
+          unread={0}
+          meta={null}
+          user={null}
+          stream={streamStatus}
+          onSignOut={signOut}
+        />
         <main className="shell" style={{ paddingTop: 60, display: 'flex', justifyContent: 'center' }}>
           <Spinner />
         </main>
@@ -363,7 +450,15 @@ export default function App(): React.JSX.Element {
 
   return (
     <div className="app">
-      <Header view={view} navigate={navigate} unread={unread} meta={meta} user={user} onSignOut={signOut} />
+      <Header
+        view={view}
+        navigate={navigate}
+        unread={unread}
+        meta={meta}
+        user={user}
+        stream={streamStatus}
+        onSignOut={signOut}
+      />
 
       <main className="shell">
         {error ? (
@@ -457,6 +552,7 @@ function Header({
   unread,
   meta,
   user,
+  stream,
   onSignOut,
 }: {
   view: View;
@@ -464,6 +560,7 @@ function Header({
   unread: number;
   meta: Meta | null;
   user: User | null;
+  stream: StreamStatus;
   onSignOut: () => void;
 }): React.JSX.Element {
   return (
@@ -498,6 +595,7 @@ function Header({
 
         {user ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <LiveDot status={stream} />
             <span
               className="num"
               style={{ fontSize: 12, color: 'var(--text-3)' }}
@@ -516,5 +614,29 @@ function Header({
         ) : null}
       </div>
     </header>
+  );
+}
+
+/**
+ * Whether the page is being pushed to, or is falling back to polling.
+ *
+ * Worth showing, and worth showing honestly. A user deciding whether to act on
+ * a number is entitled to know if the screen is live or refreshing every two
+ * minutes - and if the stream is down, saying so is much better than a page
+ * that looks live and is not. Deliberately tiny: it is reassurance, not news.
+ */
+function LiveDot({ status }: { status: StreamStatus }): React.JSX.Element {
+  const label =
+    status === 'live'
+      ? 'Live · updates are pushed as they happen'
+      : status === 'connecting'
+        ? 'Connecting to the live feed…'
+        : 'Live feed unavailable · falling back to polling every 8s';
+
+  return (
+    <span className={`live-dot is-${status}`} title={label} aria-label={label} role="status">
+      <i aria-hidden="true" />
+      <span className="live-dot-text">{status === 'live' ? 'Live' : status === 'connecting' ? '…' : 'Polling'}</span>
+    </span>
   );
 }

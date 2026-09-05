@@ -86,6 +86,12 @@ export const config = {
 
   ingest: {
     /** Scheduler wake interval. Work is claimed from a due-queue, not a timer per symbol. */
+    /**
+     * How long the change bus gathers publishes before emitting one merged
+     * event. The scheduler refreshes symbols in batches, so without this a
+     * batch of twelve becomes twelve events and twelve client refetches.
+     */
+    eventCoalesceMs: num(process.env.EVENT_COALESCE_MS, 250),
     tickMs: num(process.env.INGEST_TICK_MS, 750),
     /** Max symbols fetched per tick — the backpressure valve. */
     batchSize: num(process.env.INGEST_BATCH, 12),

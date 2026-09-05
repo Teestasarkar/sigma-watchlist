@@ -26,6 +26,7 @@ import { createLogger } from '../infra/logger.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerCoreRoutes } from './routes/core.js';
 import { registerOpsRoutes } from './routes/ops.js';
+import { registerStreamRoutes } from './routes/stream.js';
 import type { User } from '../domain/types.js';
 
 const log = createLogger('http');
@@ -60,6 +61,14 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/register',
   '/api/auth/logout',
   '/api/auth/policy',
+  /*
+   * The SSE stream authenticates with a single-use ticket instead of a
+   * bearer token, because EventSource cannot set headers. It is not
+   * unauthenticated - the handler rejects a missing or spent ticket - but
+   * the credential arrives in the query string, so this hook has to stand
+   * aside. See routes/stream.ts for why a nonce and not the session token.
+   */
+  '/api/stream',
 ]);
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
@@ -232,6 +241,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   await registerAuthRoutes(fastify, app);
   await registerCoreRoutes(fastify, app);
   await registerOpsRoutes(fastify, app);
+  await registerStreamRoutes(fastify, app);
 
   /*
    * Serving the built frontend from the API process gives production a single

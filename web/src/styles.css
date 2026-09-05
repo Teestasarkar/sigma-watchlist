@@ -1358,3 +1358,74 @@ body {
     padding: 22px 18px 20px;
   }
 }
+
+/* ── the live indicator ─────────────────────────────────────────────────
+ *
+ * Small on purpose. It answers "is this screen actually live?" for anyone who
+ * thinks to ask, and stays out of the way of everyone who does not.
+ */
+.live-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  padding: 2px 7px 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.live-dot i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+}
+
+.live-dot.is-live {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 35%, transparent);
+}
+.live-dot.is-live i {
+  background: var(--up);
+  /* A slow pulse reads as "connected and idle" rather than "loading". */
+  animation: live-pulse 2.4s ease-in-out infinite;
+}
+
+.live-dot.is-connecting i {
+  animation: live-pulse 0.9s ease-in-out infinite;
+}
+
+.live-dot.is-offline {
+  color: var(--text-3);
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Respect a stated preference for stillness; the colour still carries it. */
+@media (prefers-reduced-motion: reduce) {
+  .live-dot i {
+    animation: none;
+  }
+}
+
+/* The dot alone is enough once space is tight. */
+@media (max-width: 560px) {
+  .live-dot-text {
+    display: none;
+  }
+  .live-dot {
+    padding: 4px;
+  }
+}

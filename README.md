@@ -207,6 +207,7 @@ the number of people. This is the single decision the whole design rests on.
 | Many symbols | `ingest_jobs` is a queue table, not a timer per symbol. `FOR UPDATE SKIP LOCKED` hands concurrent workers **disjoint** batches, so the ingest tier scales horizontally with no coordination service. |
 | Attention | Three poll tiers. A symbol someone is *looking at* polls every 5s; one merely sitting in a list, every 20s; one nobody has opened, every 2 min. Attention earns freshness — that is what makes a 500-symbol list affordable. |
 | Bounded cost | Batch size caps per-tick work; concurrency is bounded inside a batch; market-closed multiplies every interval by 8. |
+| Many connected browsers | The live stream broadcasts per **symbol**, not per user, and carries no payload — one event serves every subscriber, and each client re-reads its own personalised view. Broadcast cost scales with instruments, not users. Bursts are coalesced into one event per 250ms. |
 | Unbounded growth | Signals and idempotency keys are pruned past the maximum digest lookback. Bind-parameter limits are chunked, so the user with 3,000 symbols does not hit a wall nobody tested. |
 
 ### Handling unreliable data
@@ -224,6 +225,21 @@ Every one of these exists because it was hit, and each is exercised by a test:
   (which lets a single broken fast provider win every time).
 - **Garbage prices.** A provider returning `0` for a price is discarded rather
   than propagated as a −100% move.
+- **A vendor that reports a date but no time.** CNBC does. Stamping those
+  quotes with our own receive time would have won every `asOf` comparison and
+  pinned freshness to `fresh` permanently — so all weekend, with the exchange
+  shut, the quote would have claimed to be seconds old, disabling the `closed`
+  state and the stale-data detector with it. The date is mapped to that
+  session's closing bell instead, clamped so a live session cannot produce a
+  future timestamp.
+- **A live stream that dies quietly.** The dangerous failure is not a stream
+  that errors — the browser reports those — but one held open and silent by a
+  buffering proxy. Polling never stops; it drops to a two-minute heartbeat
+  while the stream is healthy, which caps how long a screen can be wrong.
+- **A reconnect gap that cannot be reconstructed.** If a client asks to resume
+  from a sequence older than the retained buffer, the server says `resync` and
+  the client reloads. Silently sending nothing would leave it confidently
+  displaying stale data — a rich failure for this product in particular.
 - **Staleness as a ladder,** not a boolean: fresh → delayed → stale → unknown,
   each rendered differently. A future timestamp is `unknown`, not fresh —
   that's a broken clock, not a current price.
@@ -289,15 +305,37 @@ Resilience you cannot demonstrate is decoration. This is how you check.
 ### Choosing a feed
 
 ```bash
-npm run dev                        # live Yahoo data (the default)
-PROVIDERS=synthetic npm run dev    # the deterministic simulator
-PROVIDERS=yahoo,finnhub npm run dev   # two live sources, real reconciliation
+npm run dev                          # two live sources, no API key (the default)
+PROVIDERS=yahoo npm run dev          # one live source
+PROVIDERS=synthetic npm run dev      # the deterministic simulator
+PROVIDERS=yahoo,finnhub npm run dev  # a third, if you have a Finnhub key
 ```
 
-Adding a second live source (`FINNHUB_API_KEY=…`) is what turns reconciliation
-from a code path into a demonstrated behaviour: two independent vendors quoting
-the same instrument, a recorded conflict when they disagree beyond tolerance,
-a median rather than the freshest, and a lowered confidence that the UI shows.
+**The default is two live vendors, and neither needs an API key.** That is
+deliberate: with a single provider, reconciliation is dead code — the median is
+never taken, the spread is always zero, the confidence penalty never fires. Two
+independent vendors quoting the same instrument makes it a demonstrated
+behaviour instead: a recorded conflict when they disagree beyond tolerance, a
+median rather than the freshest, and a lowered confidence the UI shows.
+
+See it for yourself, without starting the app:
+
+```bash
+cd server && npx tsx src/scripts/vendorCheck.ts AAPL MSFT NVDA TSLA
+```
+
+```
+market CLOSED  ·  last session close 2026-09-04T20:01:00Z
+
+AAPL
+  cnbc      319.97   asOf 2026-09-04T20:00:00Z
+  yahoo     319.97   asOf 2026-09-04T20:00:01Z
+  → 319.97 via cnbc+yahoo  ·  spread within tolerance  ·  closed  ·  confidence 1.000
+```
+
+CNBC serves quotes only. Merging two vendors' bar series means reconciling
+different split-adjustment conventions, and getting that subtly wrong would
+corrupt every volatility estimate — the number this whole product rests on.
 
 ### In production
 

@@ -27,6 +27,7 @@ import type { MarketRepo } from '../db/marketRepo.js';
 import type { IngestRepo } from '../db/ingestRepo.js';
 import type { DetectionEngine } from './detection.js';
 import type { CorporateActionService } from './corporateActions.js';
+import type { MarketEventBus } from './events.js';
 import { createLogger } from '../infra/logger.js';
 
 const log = createLogger('ingest');
@@ -78,6 +79,7 @@ export class IngestService {
     private readonly jobs: IngestRepo,
     private readonly detection: DetectionEngine,
     private readonly actions: CorporateActionService,
+    private readonly events: MarketEventBus,
     private readonly clock: MarketClock,
     private readonly opts: IngestOptions,
   ) {}
@@ -265,6 +267,24 @@ export class IngestService {
 
     result.signalsCreated = detected.created.length;
     result.ok = true;
+
+    /*
+     * Tell anyone watching.
+     *
+     * Only when something actually changed: a refresh that confirms the
+     * same price is not news, and pushing it would make every connected
+     * client refetch on every poll cycle - strictly worse than the polling
+     * it replaces. Publishing is fire-and-forget and buffered, so this
+     * cannot slow ingest down or fail it.
+     */
+    if (result.quoteAccepted || result.signalsCreated > 0) {
+      this.events.publish({
+        symbol,
+        quote: result.quoteAccepted,
+        signals: result.signalsCreated,
+      });
+    }
+
     return result;
   }
 
