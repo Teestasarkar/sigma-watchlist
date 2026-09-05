@@ -39,10 +39,24 @@ services:
       # to remove those routes entirely.
       - key: DEV_TOOLS
         value: "1"
+      # Live market data. No API key required.
+      # Add FINNHUB_API_KEY and use "yahoo,finnhub" for real two-source
+      # reconciliation; use "synthetic" for the deterministic simulator.
+      - key: PROVIDERS
+        value: yahoo
+      # Published on purpose - a demo account with a secret password is not a
+      # demo account. Override for any deployment where that is not intended.
+      - key: DEMO_PASSWORD
+        value: sigma-demo-2026
       # A free instance sleeps when idle, so it wakes with a gap in its
       # history. Backfill handles that correctly - see IngestService - but a
-      # gentler poll cadence keeps the instance well inside its CPU allowance.
+      # gentler poll cadence keeps the instance well inside its CPU allowance,
+      # and well inside an undocumented upstream rate limit.
       - key: INGEST_TICK_MS
-        value: "1500"
+        value: "2000"
       - key: INGEST_BATCH
-        value: "8"
+        value: "6"
+      - key: INGEST_WARM_MS
+        value: "45000"
+      - key: INGEST_COLD_MS
+        value: "300000"
