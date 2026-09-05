@@ -25,6 +25,7 @@ import { systemClock, type Clock } from './infra/clock.js';
 import { createLogger } from './infra/logger.js';
 import { createFaultState, type FaultState } from './providers/faults.js';
 import { SyntheticProvider } from './providers/synthetic.js';
+import { YahooProvider } from './providers/yahoo.js';
 import { FinnhubProvider } from './providers/finnhub.js';
 import { ProviderRegistry } from './providers/registry.js';
 import type { MarketDataProvider } from './providers/types.js';
@@ -33,6 +34,7 @@ import { hashPassword } from './infra/password.js';
 import { DetectionEngine, thresholdsFromConfig } from './services/detection.js';
 import { IngestService } from './services/ingest.js';
 import { ViewService } from './services/view.js';
+import { ReplayService } from './services/replay.js';
 import { Scheduler } from './ingest/scheduler.js';
 
 const log = createLogger('app');
@@ -53,6 +55,7 @@ export interface App {
   registry: ProviderRegistry;
   detection: DetectionEngine;
   ingest: IngestService;
+  replay: ReplayService;
   view: ViewService;
   scheduler: Scheduler;
 
@@ -88,7 +91,18 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
    * measured against a real 6.5-hour session and read as a 40-sigma event.
    * With a real provider configured we use real exchange hours.
    */
-  const usingSynthetic = config.providers.enabled.includes('synthetic');
+  /*
+   * The clock follows the *primary* provider, not merely whether the simulator
+   * is present at all.
+   *
+   * A live feed reports real exchange timestamps, so it needs real NYSE hours;
+   * the simulator compresses a session into seconds and needs a clock that
+   * agrees with that compression. Listing the simulator as a *fallback* behind
+   * a live feed must not drag the whole system onto the compressed grid - so
+   * this looks at what comes first.
+   */
+  const primaryProvider = config.providers.enabled[0] ?? 'synthetic';
+  const usingSynthetic = primaryProvider === 'synthetic' || primaryProvider === 'synthetic-alt';
   const marketClock: MarketClock = usingSynthetic
     ? new SimulatedMarketClock(
         clock.now(),
@@ -110,6 +124,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
       minBarsForStats: config.signals.minBarsForStats,
     },
     clock,
+    marketClock,
   });
 
   const market = new MarketRepo(sql, marketClock);
@@ -124,6 +139,11 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     historySessions: config.providers.historySessions,
     freshness: config.freshness,
     maxBackfillSessions: 90,
+  });
+
+  const replay = new ReplayService(market, detection, marketClock, {
+    sessions: config.replay.sessions,
+    minHistory: config.replay.minHistory,
   });
 
   const view = new ViewService(users, market, signals, jobs, registry, marketClock, {
@@ -159,6 +179,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     registry,
     detection,
     ingest,
+    replay,
     view,
     scheduler,
 
@@ -169,30 +190,62 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
        * Register instrument metadata for the whole universe up front so search
        * works immediately, but do NOT seed price history for all of them -
        * that is hundreds of rows per symbol for instruments nobody may ever
-       * watch. History is seeded lazily when a symbol is first added to a list.
+       * watch. History is seeded lazily when a symbol is first added.
+       *
+       * This runs in live mode too. The tickers, names and sectors in
+       * universe.ts are the real ones, so they are correct metadata whichever
+       * feed supplies the prices - and without it, search is empty and there
+       * is no benchmark, which silently disables every market-adjusted signal.
        */
-      if (usingSynthetic) {
-        for (const entry of ALL_ENTRIES) {
-          await market.upsertInstrument({
-            symbol: entry.symbol,
-            name: entry.name,
-            exchange: 'SIMULATED',
-            currency: 'USD',
-            sector: entry.sector,
-            isBenchmark: entry.symbol === BENCHMARK.symbol,
-            now,
-          });
-        }
+      for (const entry of ALL_ENTRIES) {
+        await market.upsertInstrument({
+          symbol: entry.symbol,
+          name: entry.name,
+          exchange: usingSynthetic ? 'SIMULATED' : null,
+          currency: 'USD',
+          sector: entry.sector,
+          isBenchmark: entry.symbol === BENCHMARK.symbol,
+          now,
+        });
+      }
 
-        // The benchmark is the exception: every market-adjusted detector needs
-        // its history, so it is seeded eagerly and polled always.
+      /*
+       * The benchmark is the exception to lazy seeding: every market-adjusted
+       * detector needs its history to compute a beta, so it is fetched eagerly
+       * and polled always, whether or not anyone watches it.
+       */
+      try {
         await ingest.ensureInstrument(BENCHMARK.symbol, now, {
           isBenchmark: true,
           pollIntervalMs: config.ingest.warmIntervalMs,
         });
+      } catch (err) {
+        // A benchmark we cannot fetch costs us the market-adjusted signals,
+        // not the whole product. Start anyway and retry on the next cycle.
+        log.error('could not seed the benchmark; market-adjusted signals are disabled until it recovers', {
+          symbol: BENCHMARK.symbol,
+          err: err instanceof Error ? err.message : String(err),
+        });
       }
 
       await ensureDemoUser(app, now);
+
+      /*
+       * Replay real history through the detectors.
+       *
+       * Without this, a freshly-seeded instance knows a year of prices and has
+       * no signals at all - so the briefing is empty until something happens
+       * while we happen to be watching. Opening the app at the weekend would
+       * show nothing, even though the week was full of events.
+       *
+       * Detection is idempotent, so this is safe to run on every boot; it only
+       * emits for symbols whose episodes have not already been recorded.
+       */
+      if (config.replay.enabled) {
+        const watched = await jobs.watchedSymbols();
+        await replay.replayMissing(watched);
+      }
+
       log.info('bootstrap complete', {
         clock: marketClock.name,
         providers: registry.providerNames.join(','),
@@ -208,6 +261,11 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
   return app;
 }
 
+/** Providers that produce prices for the *real* market. */
+const LIVE_PROVIDERS = new Set(['yahoo', 'finnhub']);
+/** Providers that produce prices for a simulated market. */
+const SIMULATED_PROVIDERS = new Set(['synthetic', 'synthetic-alt']);
+
 function buildProviders(
   config: Config,
   marketClock: MarketClock,
@@ -216,7 +274,39 @@ function buildProviders(
 ): MarketDataProvider[] {
   const providers: MarketDataProvider[] = [];
 
+  /*
+   * Live and simulated feeds are mutually exclusive, and this is not a
+   * limitation to work around - mixing them would be actively wrong.
+   *
+   * They describe different universes. Real AAPL is $320; simulated AAPL is
+   * $170. Reconciling those produces a permanent "sources disagree by 47%",
+   * and interleaving their bars produces a price series with a cliff in the
+   * middle that would read as the largest gap in market history. So whichever
+   * kind comes first in PROVIDERS wins, and the other kind is dropped with a
+   * warning rather than silently corrupting the data.
+   */
+  const primary = config.providers.enabled[0] ?? 'synthetic';
+  const wantLive = LIVE_PROVIDERS.has(primary);
+
   for (const name of config.providers.enabled) {
+    const isLive = LIVE_PROVIDERS.has(name);
+    const isSimulated = SIMULATED_PROVIDERS.has(name);
+
+    if (wantLive && isSimulated) {
+      log.warn('ignoring simulated provider behind a live one', {
+        provider: name,
+        because: 'its prices describe a different market and cannot be reconciled with real ones',
+      });
+      continue;
+    }
+    if (!wantLive && isLive) {
+      log.warn('ignoring live provider behind a simulated one', {
+        provider: name,
+        because: 'its prices describe a different market and cannot be reconciled with simulated ones',
+      });
+      continue;
+    }
+
     switch (name) {
       case 'synthetic': {
         if (!(marketClock instanceof SimulatedMarketClock)) {
@@ -255,6 +345,16 @@ function buildProviders(
             bias: 1.0004,
           }),
         );
+        break;
+      }
+
+      case 'yahoo': {
+        /*
+         * Live equity data, no API key. Undocumented and therefore expected to
+         * misbehave - which is what the breaker, the limiter and the fallback
+         * ordering in PROVIDERS are for.
+         */
+        providers.push(new YahooProvider(marketClock, clock));
         break;
       }
 

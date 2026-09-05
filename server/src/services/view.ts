@@ -264,9 +264,7 @@ export class ViewService {
           sortKey: 0,
         };
 
-      const freshness: Freshness = quote
-        ? classifyFreshness(quote.asOf, now, this.opts.freshness)
-        : 'unknown';
+      const freshness: Freshness = quote ? this.freshnessOf(quote, now) : 'unknown';
 
       const sinceSeen = this.sinceSeen(symbol, snap, now);
 
@@ -350,6 +348,15 @@ export class ViewService {
     return { from, fromAt, changePct, sigma };
   }
 
+  /** Freshness, judged against trading hours rather than the wall clock. */
+  private freshnessOf(quote: Quote, now: number): Freshness {
+    return classifyFreshness(quote.asOf, now, {
+      ...this.opts.freshness,
+      marketOpen: this.clock.isOpen(now),
+      lastSessionCloseAt: this.clock.lastCompletedSessionAt(now),
+    });
+  }
+
   /**
    * Highest-severity open signal per symbol, in one query.
    *
@@ -385,7 +392,9 @@ export class ViewService {
     stats?: ReadonlyMap<string, InstrumentStats>,
   ): Promise<DataHealth> {
     const now = Date.now();
-    const order: Freshness[] = ['fresh', 'delayed', 'stale', 'unknown'];
+    // Ordered best to worst. `closed` sits alongside `fresh`: a closing price
+    // in a closed market is not a degradation.
+    const order: Freshness[] = ['fresh', 'closed', 'delayed', 'stale', 'unknown'];
     let worst: Freshness = 'fresh';
 
     const stale: string[] = [];
@@ -395,9 +404,7 @@ export class ViewService {
 
     for (const symbol of symbols) {
       const quote = quotes.get(symbol);
-      const freshness: Freshness = quote
-        ? classifyFreshness(quote.asOf, now, this.opts.freshness)
-        : 'unknown';
+      const freshness: Freshness = quote ? this.freshnessOf(quote, now) : 'unknown';
 
       if (order.indexOf(freshness) > order.indexOf(worst)) worst = freshness;
       if (freshness === 'stale' || freshness === 'unknown') stale.push(symbol);

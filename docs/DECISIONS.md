@@ -141,38 +141,92 @@ instance. The `SqlClient` seam means adding a read-replica driver is one file.
 
 ---
 
-## 6. The default feed is a simulator
+## 6. The default feed is live, and the simulator stays
 
-**Decision.** A seeded, deterministic, factor-model market simulator is the
-default provider. Real providers implement the same interface and are preferred
-when configured.
+**Decision.** Live Yahoo Finance data by default, with a seeded simulator
+available behind one environment variable. They are mutually exclusive.
 
-**The alternative** — ship against a free live API — fails immediately. Free
-tiers give 25 requests/day (Alpha Vantage) or 60/minute (Finnhub, no history
-on the free plan), against a 30-symbol watchlist polled continuously. The
-reviewer's first experience would be an empty screen and a 429.
+**What changed my mind.** The first version shipped simulator-first, and the
+reasoning was sound as far as it went: every free API is rate-limited into
+uselessness, so a live feed risked the reviewer's first experience being an
+empty screen and a 429. What that reasoning missed is that "the prices are
+invented" is the one sentence that makes a reader discount everything else in
+the project. Yahoo's chart endpoint turned out to return a live quote *and* a
+year of daily bars in one keyless call, which removes the constraint entirely.
 
-**Given up.** The prices are not real. This is stated in the UI, in every
-quote's `source` field, and here. Using real tickers with invented numbers is a
-defensible demo convention *only* if it is unmissable, so it is labelled in
-three places.
+**Given up.** An undocumented endpoint. It can change or start refusing traffic
+without notice, and there is no support channel. Mitigated rather than
+pretended away: conservative rate limiting, a circuit breaker, single-flight
+coalescing, a cache that lets one call serve both the quote and the history,
+and `PROVIDERS=synthetic` as a one-variable escape hatch.
 
-**What was gained beyond "it runs".**
+**Why the simulator survives.** Two things a real exchange cannot do on demand:
+be broken, and be verified. The Lab page shocks a price, halts an instrument
+and makes two sources disagree - none of which you can ask NYSE for. And
+because the simulated returns genuinely carry the configured betas, a test can
+assert that regressing them **recovers those betas**, which is what makes "the
+market explains this move" a checkable claim rather than an assertion.
 
-- The interesting behaviour is reproducible. A 4σ move is a button.
-- Failure modes are *demonstrable*. The Lab page can kill the feed, age the
-  data, halt an instrument, or make two sources disagree — so the resilience
-  code is exercised rather than asserted.
-- The factor structure makes the analysis testable. Because the generated
-  returns really do have the configured betas, a test can assert that
-  regressing the simulated data **recovers them**. If the simulator were noise,
-  every "the market explains this" claim would be measuring nothing.
+**Mutual exclusion is enforced at startup**, and that is not a limitation to
+work around. Real AAPL is $320; simulated AAPL is $170. Reconciling them
+reports a permanent 47% disagreement, and interleaving their bars produces a
+price series with a cliff in the middle that reads as the largest gap in market
+history. Whichever kind is listed first wins; the other is dropped with a
+warning.
 
-**A bug this decision exposed:** the simulator originally read `Date.now()`
-directly rather than its injected clock, so it kept answering from real time
-while a test advanced the world around it. Harmless in production, fatal to
-testability — and exactly the kind of thing that hides until you try to test a
-three-day outage.
+---
+
+## 6a. A closed market is not stale data
+
+**Decision.** Freshness is judged against the *market's* clock, and has a
+distinct `closed` state.
+
+**The bug this fixes.** Freshness started as pure wall-clock age: under thirty
+seconds fresh, under five minutes delayed, beyond that stale. Correct during
+trading hours and completely wrong outside them. On a Saturday every price is
+hours old, so the whole watchlist rendered red, the health strip claimed a
+degraded feed, and - worst - detection *suppressed all market analysis*,
+because the rule "do not analyse a price we do not trust" was being applied to
+a price that was perfectly trustworthy.
+
+A Friday closing print read on Saturday is not a fetch we failed. There has
+been no trading to miss. It is the current price.
+
+**So:** if the market is shut and the quote is at or after the last completed
+session's close, it is `closed` - full confidence, analysis proceeds, and the
+UI says "market closed, showing the last closing prices" rather than crying
+wolf. A quote that predates the last close *is* genuinely stale, because that
+means a whole session was missed, and that is a real failure.
+
+**Given up.** One more state for every consumer to handle, and a grace window
+of ninety minutes around the bell that is a judgement call rather than a fact.
+
+---
+
+## 6b. Replaying history so a new instance has something to say
+
+**Decision.** On startup, walk the detectors across stored bars in
+chronological order and record the signals they would have produced.
+
+**The problem.** Detection runs on live quotes. A freshly-seeded instance knows
+a year of prices and holds no signals whatsoever, so its briefing is empty
+until something happens while it happens to be watching. Open it at the weekend
+and it has nothing to say about a week that was full of events. That is a
+product failure, not merely a demo problem: a user adding a symbol on Saturday
+should be able to see that it gapped 8% on Wednesday.
+
+**Why it is a replay and not hindsight.** Statistics are recomputed on a prefix
+of the history at each step, so a move in March is judged against the
+volatility known in March. Feeding it full-history statistics would make every
+historical signal wrong in the direction that flatters us. It also runs through
+the same episode state machine in chronological order, so a two-week trend
+produces one signal rather than one per bar.
+
+**Given up.** It is expensive - a year of statistics recomputed per replayed
+session - so it is capped at a dozen sessions and skips symbols that already
+have signals. And a daily bar is not an intraday path: a session that fell 5%
+and recovered looks flat, so intraday-shaped signals are not recoverable. Both
+limits are stated in the module rather than hidden.
 
 ---
 
@@ -246,20 +300,49 @@ request, not by the tier interval.
 
 ---
 
-## 10. Auth is a bearer token with no password
+## 10. Real credentials, and scrypt rather than argon2id
 
-**Decision.** `POST /api/session` with a handle returns a token. No password,
-no email verification, no refresh flow.
+**Decision.** Password authentication using `scrypt` from `node:crypto`, at the
+OWASP floor of N=65536, r=8, p=1.
 
-**Reasoning.** Authentication is not what this exercise is about, and a
-half-built login (password hashing but no reset, no rate limiting on attempts,
-no session revocation) is *worse* than an obvious shortcut: it invites the
-reader to assume a security property that is not there. This is honest about
-being a demo.
+**Why not argon2id,** which is the current first recommendation: it needs a
+native module. A build step that can fail on a deployment target is its own
+class of outage, and this project already made the same trade once when it
+dropped `better-sqlite3`. scrypt is memory-hard, in the standard library, and
+explicitly acceptable at these parameters.
 
-**What is real** because it affects the design: sessions are rows, so
-revocation is a `DELETE`; tokens are opaque and random; the token is the rate-
-limit key. Adding real credentials touches one table and one route.
+**What this earned beyond a login form.** Each of the following is an attack
+the obvious implementation permits:
+
+- A **per-account salt**, so one cracked hash reveals nothing about another and
+  a precomputed table is useless. Cost parameters are stored *inside* the hash
+  string, so they can be raised later without invalidating existing passwords -
+  and a successful login is the one moment the plaintext is in hand, so that is
+  where an under-cost hash is transparently upgraded.
+- **Constant-time comparison.** A byte-by-byte early exit leaks how much of a
+  guess was correct, which turns cracking into a per-character search.
+- **A missing account still pays for a full hash**, and every failure returns
+  an identical status, code and message. Otherwise the error text - or simply
+  the response time - is a free account-enumeration oracle. Both are asserted,
+  including a timing-ratio check.
+- **Lockout state in Postgres, not a process-local map**, which a deploy or a
+  second replica would defeat. Five free attempts, then a doubling delay to
+  fifteen minutes, applied to the correct password too: a lockout that lets the
+  right password through is a hint, not a lockout.
+- **A concurrency gate on hashing.** Memory-hard means about 64MB per hash;
+  without a cap, a handful of simultaneous logins is a trivial
+  memory-exhaustion attack on a small instance.
+- **Changing a password revokes every other session.** A change that leaves an
+  intruder's token working has achieved nothing.
+
+**Given up.** No email, so no password reset and no verification - which also
+means "that username is taken" is unavoidably an enumeration signal for a
+chosen display name. A real product keys accounts on a verified email; that is
+the first thing I would add. No TOTP, no OAuth.
+
+**The demo account's password is published** in the UI and in the API's policy
+endpoint. That is deliberate: a demo account with a secret password is not a
+demo account.
 
 ---
 
@@ -305,6 +388,10 @@ not having thought of it.
   deployment needs an adjustment feed. This is the most serious remaining
   correctness gap and I would fix it before showing this to anyone with money
   at stake.
+- **A second live vendor by default.** Cross-vendor reconciliation is
+  implemented and works, but a second vendor needs an API key, so the
+  default is one live source. `PROVIDERS=yahoo,finnhub` with a Finnhub key
+  turns it on.
 - **A CSS framework.** ~900 lines of hand-written CSS with design tokens.
   Tailwind would have been faster to type and would have put the design
   decisions in the markup, where they are harder to keep coherent.

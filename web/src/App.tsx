@@ -319,10 +319,13 @@ export default function App(): React.JSX.Element {
   const handleSignedIn = (signedIn: User, isNew: boolean): void => {
     setUser(signedIn);
     setError(null);
+    // Deliberately does not claim a checkpoint exists: a returning account that
+    // has never pressed "Catch me up" has none, and saying otherwise
+    // contradicts the briefing directly below it.
     flash(
       isNew
-        ? `Welcome, ${signedIn.handle}. A starter watchlist is ready — history is already seeded, so the numbers mean something immediately.`
-        : `Welcome back, ${signedIn.handle}. Your checkpoint is where you left it.`,
+        ? `Welcome, ${signedIn.handle}. A starter watchlist is ready, with a year of history already seeded — so the numbers mean something from the first screen.`
+        : `Welcome back, ${signedIn.handle}.`,
     );
     void loadForUser();
   };

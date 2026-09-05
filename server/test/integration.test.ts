@@ -35,6 +35,10 @@ const config = {
   databaseUrl: '',
   devTools: true,
   ingest: { ...baseConfig.ingest, enabled: false },
+  // Replay is covered by its own suite. Leaving it on here would seed
+  // historical signals and make every count in this file depend on whatever
+  // the seeded market happened to do.
+  replay: { ...baseConfig.replay, enabled: false },
   providers: {
     ...baseConfig.providers,
     enabled: ['synthetic'],
@@ -368,7 +372,12 @@ describe('the watermark', () => {
 
     const undo = await call('POST', '/api/digest/undo', {});
     expect(undo.body.restored).toBeGreaterThan(0);
-    expect((await call('GET', '/api/digest')).body.groups.length).toBe(beforeCount);
+    // At least what was there before. Not exactly: undo restores the
+    // *checkpoint*, and any signal detected in the meantime is legitimately
+    // inside the restored window too.
+    expect((await call('GET', '/api/digest')).body.groups.length).toBeGreaterThanOrEqual(
+      beforeCount,
+    );
   });
 
   it('is undoable even on the very first acknowledgement', async () => {

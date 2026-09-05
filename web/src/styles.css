@@ -1250,3 +1250,111 @@ input[type="range"] {
 input[aria-invalid="true"] {
   border-color: color-mix(in srgb, var(--warn) 55%, transparent);
 }
+
+/* A closed market is not a fault, so it gets its own calm colour rather than
+   the amber of "delayed" or the red of "stale". */
+.dot[data-state="closed"] {
+  background: var(--info);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--info) 18%, transparent);
+}
+
+/* ─────────────────────────────────────────────────────────── responsive */
+
+/*
+ * The flexbox min-width trap.
+ *
+ * `.app` is a flex column, which gives its children `min-width: auto` - so
+ * `.shell` refuses to shrink below the width of its widest content. The
+ * watchlist table is deliberately 880px wide and meant to scroll inside its
+ * own container, but with an unshrinkable parent it instead pushed the whole
+ * page 344px wider than the viewport on a phone. `overflow-x: auto` never got
+ * the chance to do anything.
+ */
+.app > *,
+.shell,
+.table-wrap {
+  min-width: 0;
+}
+
+/* Belt and braces: the page itself must never scroll sideways. */
+body {
+  overflow-x: hidden;
+}
+
+@media (max-width: 720px) {
+  .header-inner {
+    flex-wrap: wrap;
+    gap: 10px 12px;
+    padding: 10px 14px;
+  }
+
+  /* The tagline is the first thing to go; the mark and name carry the brand. */
+  .brand .tag {
+    display: none;
+  }
+
+  .nav {
+    order: 3;
+    width: 100%;
+  }
+
+  .nav button {
+    flex: 1;
+    padding: 8px 10px;
+  }
+
+  .shell {
+    padding: 0 14px 56px;
+  }
+
+  /* Stop the add-symbol control from pushing the heading off the edge. */
+  .section-head {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .section-head .spacer {
+    display: none;
+  }
+
+  .add-wrap,
+  .add-wrap > div {
+    width: 100%;
+  }
+
+  .add-wrap input[type='text'] {
+    flex: 1;
+    width: auto !important;
+  }
+
+  .brief-head {
+    padding: 24px 0 18px;
+  }
+
+  .signal {
+    padding: 12px 13px;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Long provider summaries wrap rather than stretching the strip. */
+  .health-strip {
+    align-items: flex-start;
+  }
+
+  .health-strip > span:last-child {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .brief-title {
+    font-size: 22px;
+  }
+
+  .signin-card {
+    padding: 22px 18px 20px;
+  }
+}

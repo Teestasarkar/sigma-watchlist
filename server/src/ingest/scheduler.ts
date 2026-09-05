@@ -50,6 +50,8 @@ export interface SchedulerStats {
   ticks: number;
   refreshed: number;
   failed: number;
+  /** Held back by our own rate limiter. Not failures. */
+  throttled: number;
   signalsCreated: number;
   lastTickAt: number | null;
   lastTickDurationMs: number | null;
@@ -65,6 +67,7 @@ export class Scheduler {
   private ticks = 0;
   private refreshed = 0;
   private failed = 0;
+  private throttled = 0;
   private signalsCreated = 0;
   private lastTickAt: number | null = null;
   private lastTickDurationMs: number | null = null;
@@ -168,6 +171,21 @@ export class Scheduler {
         this.refreshed++;
         this.signalsCreated += result.signalsCreated;
         await this.jobs.completeOk(job.symbol, now + this.intervalFor(job, now), now);
+        return;
+      }
+
+      /*
+       * Throttled by our own limiter: come back shortly.
+       *
+       * Crucially this is NOT counted as a failure. Treating it as one meant
+       * our own budget running out inflated the failure streak, which drove
+       * `backoffFor` into exponential delays and degraded polling for minutes
+       * against a provider that was perfectly healthy.
+       */
+      if (result.throttled) {
+        this.throttled++;
+        const wait = Math.max(250, Math.min(result.retryAfterMs ?? 1000, 10_000));
+        await this.jobs.completeOk(job.symbol, now + wait, job.lastOkAt ?? now);
         return;
       }
 
@@ -312,6 +330,7 @@ export class Scheduler {
       ticks: this.ticks,
       refreshed: this.refreshed,
       failed: this.failed,
+      throttled: this.throttled,
       signalsCreated: this.signalsCreated,
       lastTickAt: this.lastTickAt,
       lastTickDurationMs: this.lastTickDurationMs,

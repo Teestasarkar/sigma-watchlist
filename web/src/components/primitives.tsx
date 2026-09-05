@@ -60,11 +60,13 @@ export function FreshnessDot({
   const title =
     state === 'fresh'
       ? 'Priced within the last few seconds'
-      : state === 'delayed'
-        ? 'Last update is a few minutes old'
-        : state === 'stale'
-          ? 'We have not been able to price this recently'
-          : 'No usable price for this instrument';
+      : state === 'closed'
+        ? 'The market is closed. This is the last completed session’s closing price, which is the current price.'
+        : state === 'delayed'
+          ? 'Last update is a few minutes old'
+          : state === 'stale'
+            ? 'We have not been able to price this recently'
+            : 'No usable price for this instrument';
   return (
     <span
       style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}

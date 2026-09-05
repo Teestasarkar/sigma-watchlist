@@ -120,6 +120,8 @@ const FRESHNESS_LABELS: Record<Freshness, string> = {
   fresh: 'Live',
   delayed: 'Delayed',
   stale: 'Stale',
+  // Not a degradation. There is simply no trading to be behind on.
+  closed: 'At the close',
   unknown: 'No data',
 };
 

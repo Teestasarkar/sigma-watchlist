@@ -9,7 +9,7 @@
  * real payloads.
  */
 
-export type Freshness = 'fresh' | 'delayed' | 'stale' | 'unknown';
+export type Freshness = 'fresh' | 'delayed' | 'stale' | 'closed' | 'unknown';
 export type Direction = 'up' | 'down' | 'neutral';
 
 export type SignalKind =

@@ -30,6 +30,7 @@ import {
   retry,
 } from '../infra/resilience.js';
 import type { Clock } from '../infra/clock.js';
+import type { MarketClock } from '../domain/marketClock.js';
 import { systemClock } from '../infra/clock.js';
 import type { Bar, ProviderHealth, Quote, RawQuote } from '../domain/types.js';
 import {
@@ -53,6 +54,32 @@ export interface RegistryOptions {
   reconcile: Omit<ReconcileOptions, 'preference'>;
   retry?: { attempts: number; baseMs: number; maxMs: number };
   clock?: Clock;
+  /**
+   * The market clock, so freshness is judged against trading hours rather than
+   * the wall clock - see classifyFreshness.
+   */
+  marketClock: MarketClock;
+}
+
+/**
+ * Raised when no provider was even *attempted* because our own rate limiter
+ * held them all back.
+ *
+ * Deliberately distinct from AllProvidersFailedError. Conflating the two was a
+ * real bug: our own budget running out was being recorded as an upstream
+ * failure, which tripped the circuit breaker against a provider that was
+ * answering every request in half a second, and drove the scheduler into
+ * exponential backoff. A protective mechanism that reports itself as an outage
+ * is worse than no protection at all.
+ */
+export class LocallyThrottledError extends Error {
+  constructor(
+    readonly symbol: string,
+    readonly retryAfterMs: number,
+  ) {
+    super(`local rate limit reached for ${symbol}; retry in ${retryAfterMs}ms`);
+    this.name = 'LocallyThrottledError';
+  }
 }
 
 /** Raised when every configured provider refused or failed. */
@@ -95,10 +122,18 @@ export class ProviderRegistry {
       this.entries.push({
         provider,
         breaker: new CircuitBreaker(provider.name, opts.breaker, this.clock),
-        // Refill continuously rather than in per-minute steps, so a burst at
-        // the top of the minute cannot exhaust the budget for the whole minute.
+        /*
+         * Capacity is a full minute's allowance, refilled continuously.
+         *
+         * A smaller bucket looks more careful and is actually worse: the
+         * scheduler claims a *batch* of symbols at once, so a capacity below
+         * the batch size guarantees the tail of every batch is refused before
+         * a single request has actually been sent. That is self-inflicted
+         * throttling, not politeness. A full-minute burst followed by a steady
+         * drip is what "30 per minute" is supposed to mean.
+         */
         bucket: new TokenBucket(
-          Math.max(1, Math.ceil(provider.capabilities.requestsPerMinute / 6)),
+          Math.max(1, provider.capabilities.requestsPerMinute),
           provider.capabilities.requestsPerMinute / 60,
           this.clock,
         ),
@@ -135,6 +170,8 @@ export class ProviderRegistry {
       const raws: RawQuote[] = [];
       const reasons: Array<{ provider: string; error: string }> = [];
       let notFoundCount = 0;
+      let throttledCount = 0;
+      let soonestRetryMs = Number.POSITIVE_INFINITY;
 
       // Providers are queried in parallel: a slow one must not delay a fast
       // one, and the timeout is per-provider.
@@ -148,6 +185,10 @@ export class ProviderRegistry {
             raws.push(outcome.value);
           } else {
             if (outcome.notFound) notFoundCount++;
+            if (outcome.throttled) {
+              throttledCount++;
+              soonestRetryMs = Math.min(soonestRetryMs, outcome.retryAfterMs);
+            }
             reasons.push({ provider: entry.provider.name, error: outcome.error });
           }
         }),
@@ -158,13 +199,20 @@ export class ProviderRegistry {
         // down", and the caller needs to distinguish them: one means stop
         // asking, the other means try again shortly.
         if (notFoundCount === this.entries.length) throw new SymbolNotFoundError(symbol);
+        // Nobody was even asked - our own budget, not their health.
+        if (throttledCount === this.entries.length) {
+          throw new LocallyThrottledError(symbol, Number.isFinite(soonestRetryMs) ? soonestRetryMs : 1000);
+        }
         throw new AllProvidersFailedError(symbol, reasons);
       }
 
-      const quote = reconcileQuotes(raws, this.clock.now(), {
+      const now = this.clock.now();
+      const quote = reconcileQuotes(raws, now, {
         ...this.opts.reconcile,
         preference: this.preference,
         bars,
+        marketOpen: this.opts.marketClock.isOpen(now),
+        lastSessionCloseAt: this.opts.marketClock.lastCompletedSessionAt(now),
       });
 
       if (!quote) {
@@ -248,19 +296,32 @@ export class ProviderRegistry {
     entry: Entry,
     label: string,
     fn: (signal: AbortSignal) => Promise<T>,
-  ): Promise<{ ok: true; value: T } | { ok: false; error: string; notFound: boolean }> {
+  ): Promise<
+    | { ok: true; value: T }
+    | { ok: false; error: string; notFound: boolean; throttled: boolean; retryAfterMs: number }
+  > {
     if (!entry.bucket.tryTake()) {
       entry.skipped++;
+      const retryAfterMs = entry.bucket.waitMs();
+      // Not a failure. We chose not to ask.
       return {
         ok: false,
-        error: `rate limited locally (retry in ${entry.bucket.waitMs()}ms)`,
+        error: `rate limited locally (retry in ${retryAfterMs}ms)`,
         notFound: false,
+        throttled: true,
+        retryAfterMs,
       };
     }
 
     if (!entry.breaker.canAttempt()) {
       entry.skipped++;
-      return { ok: false, error: 'circuit open', notFound: false };
+      return {
+        ok: false,
+        error: 'circuit open',
+        notFound: false,
+        throttled: false,
+        retryAfterMs: 0,
+      };
     }
 
     const started = this.clock.now();
@@ -305,7 +366,7 @@ export class ProviderRegistry {
       }
 
       entry.latency.record(this.clock.now() - started);
-      return { ok: false, error: message, notFound };
+      return { ok: false, error: message, notFound, throttled: false, retryAfterMs: 0 };
     }
   }
 

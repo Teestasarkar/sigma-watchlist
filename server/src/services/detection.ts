@@ -101,6 +101,8 @@ export class DetectionEngine {
        */
       if (
         !INTEGRITY_KINDS.has(observation.kind) &&
+        // 'closed' is deliberately absent: a closing price in a shut market is
+        // the correct current price, and the analysis built on it is valid.
         (freshness === 'stale' || freshness === 'unknown')
       ) {
         observation = { ...observation, value: 0 };

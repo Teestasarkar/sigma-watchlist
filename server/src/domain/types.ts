@@ -32,7 +32,16 @@ export interface RawQuote {
   halted?: boolean;
 }
 
-export type Freshness = 'fresh' | 'delayed' | 'stale' | 'unknown';
+/**
+ * How much to trust a stored price.
+ *
+ * `closed` is the state that is easy to miss and wrong to omit. A Friday
+ * closing print read on a Saturday is not stale data we failed to fetch - it
+ * *is* the current price, because there is no trading to have missed.
+ * Collapsing it into `stale` makes the product cry wolf all weekend and, worse,
+ * suppresses the market analysis that is still perfectly valid.
+ */
+export type Freshness = 'fresh' | 'delayed' | 'stale' | 'closed' | 'unknown';
 
 /** Why we might not fully trust a price. Surfaced to the user, never swallowed. */
 export interface QuoteConflict {

@@ -41,11 +41,20 @@ export const config = {
 
   providers: {
     /**
-     * Ordered by preference. The synthetic provider is always available and is
-     * the default so the app runs with zero setup and deterministic data.
-     * Add real providers by setting the relevant key; they are then preferred.
+     * Providers in preference order. The **first** one also decides which
+     * market clock the whole system runs on (real exchange hours vs the
+     * simulator's compressed grid), so ordering is not cosmetic.
+     *
+     *   PROVIDERS=yahoo             live prices, no key required
+     *   PROVIDERS=yahoo,finnhub     two live sources, real reconciliation
+     *   PROVIDERS=synthetic         deterministic, always-moving demo
+     *
+     * Live and simulated feeds cannot be mixed - they describe different
+     * universes, and reconciling a real $320 against a simulated $170 would
+     * report a permanent 47% disagreement. Whichever kind is listed first
+     * wins and the other is dropped with a warning; see buildProviders.
      */
-    enabled: list(process.env.PROVIDERS, ['synthetic']),
+    enabled: list(process.env.PROVIDERS, ['yahoo']),
     finnhubKey: process.env.FINNHUB_API_KEY ?? '',
     alphaVantageKey: process.env.ALPHAVANTAGE_API_KEY ?? '',
     /** Synthetic feed seed — the same seed produces the same market, every run. */
@@ -147,6 +156,24 @@ export const config = {
     firstVisitLookbackSessions: num(process.env.DIGEST_FIRST_LOOKBACK_SESSIONS, 3),
     /** Hard ceiling, so returning after three months is not a firehose. */
     maxLookbackSessions: num(process.env.DIGEST_MAX_LOOKBACK_SESSIONS, 10),
+  },
+
+  /**
+   * Replaying stored history through the detectors on startup.
+   *
+   * A freshly-seeded instance holds a year of prices and no signals, so its
+   * briefing is empty until something happens while it is watching. Replaying
+   * turns real market history into a real signal timeline.
+   */
+  replay: {
+    enabled: bool(process.env.REPLAY_HISTORY, true),
+    /** Sessions to walk. Ten is about two trading weeks. */
+    sessions: num(process.env.REPLAY_SESSIONS, 12),
+    /**
+     * Bars that must precede a replayed session before it is judged. Below
+     * this the volatility estimate is not worth trusting.
+     */
+    minHistory: num(process.env.REPLAY_MIN_HISTORY, 60),
   },
 
   limits: {

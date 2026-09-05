@@ -19,6 +19,7 @@ import type { MarketClock } from '../domain/marketClock.js';
 import { computeStats } from '../domain/stats.js';
 import { classifyFreshness } from '../providers/reconcile.js';
 import {
+  LocallyThrottledError,
   ProviderRegistry,
   SymbolNotFoundError,
 } from '../providers/registry.js';
@@ -46,6 +47,13 @@ export interface RefreshResult {
   signalsCreated: number;
   error?: string;
   notFound?: boolean;
+  /**
+   * True when our own rate limiter held the request back, so nothing was
+   * actually asked of the provider. The scheduler must treat this as "come
+   * back shortly", not as a failure - see Scheduler.runJob.
+   */
+  throttled?: boolean;
+  retryAfterMs?: number;
 }
 
 /**
@@ -176,6 +184,15 @@ export class IngestService {
         await this.market.markStatus(symbol, 'delisted');
         return { ...result, error: 'symbol not found upstream', notFound: true };
       }
+      if (err instanceof LocallyThrottledError) {
+        // Our budget, not their health. No failure streak, no backoff.
+        return {
+          ...result,
+          error: err.message,
+          throttled: true,
+          retryAfterMs: err.retryAfterMs,
+        };
+      }
       return { ...result, error: err instanceof Error ? err.message : String(err) };
     }
 
@@ -235,7 +252,11 @@ export class IngestService {
   }
 
   freshnessOf(quote: Quote, now: number): Freshness {
-    return classifyFreshness(quote.asOf, now, this.opts.freshness);
+    return classifyFreshness(quote.asOf, now, {
+      ...this.opts.freshness,
+      marketOpen: this.clock.isOpen(now),
+      lastSessionCloseAt: this.clock.lastCompletedSessionAt(now),
+    });
   }
 
   /**

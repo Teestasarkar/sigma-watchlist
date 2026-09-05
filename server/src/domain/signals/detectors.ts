@@ -119,6 +119,22 @@ function elapsedSessions(ctx: DetectorContext): number {
   return Math.max(0.15, ctx.clock.sessionProgress(ctx.now));
 }
 
+/**
+ * The trading session a reading belongs to.
+ *
+ * Keyed on the quote's own timestamp, never on wall-clock "now". Those differ
+ * whenever the market is shut: on a Saturday `now` is Saturday, but the data is
+ * Friday's close. Using `now` made the episode discriminator roll over at
+ * midnight, so the same unchanged Friday move opened a *second* episode and the
+ * briefing showed one signal twice - which is precisely the duplication the
+ * episode machine exists to prevent.
+ *
+ * A signal is about a session. The session is whatever the data says it is.
+ */
+function sessionOf(ctx: DetectorContext): string {
+  return ctx.clock.sessionKeyOf(ctx.quote.asOf);
+}
+
 /** Return since the previous session's close. */
 function sessionReturn(ctx: DetectorContext): number | null {
   const { price, prevClose } = ctx.quote;
@@ -190,7 +206,7 @@ export const sigmaMove: Detector = (ctx) => {
     exit: sigmaExit,
     // One episode per session per direction: a stock that swings from +3σ to
     // -3σ intraday has genuinely done two separate things.
-    discriminator: `${ctx.clock.sessionKeyOf(ctx.now)}|${dirOf(z)}`,
+    discriminator: `${sessionOf(ctx)}|${dirOf(z)}`,
   };
 };
 
@@ -255,7 +271,7 @@ export const idioMove: Detector = (ctx) => {
     },
     enter: idioEnter,
     exit: idioExit,
-    discriminator: `${ctx.clock.sessionKeyOf(ctx.now)}|${dirOf(z)}`,
+    discriminator: `${sessionOf(ctx)}|${dirOf(z)}`,
   };
 };
 
@@ -292,7 +308,7 @@ export const gap: Detector = (ctx) => {
     // did not. The exit threshold matches the entry so the episode closes as
     // soon as the session rolls over.
     exit: ctx.thresholds.gapEnterAtr,
-    discriminator: `${ctx.clock.sessionKeyOf(ctx.now)}|${dirOf(gapPct)}`,
+    discriminator: `${sessionOf(ctx)}|${dirOf(gapPct)}`,
   };
 };
 
@@ -397,7 +413,7 @@ export const volumeSpike: Detector = (ctx) => {
     },
     enter: ctx.thresholds.rvolEnter,
     exit: ctx.thresholds.rvolExit,
-    discriminator: ctx.clock.sessionKeyOf(ctx.now),
+    discriminator: sessionOf(ctx),
   };
 };
 
@@ -525,6 +541,20 @@ export const drawdown: Detector = (ctx) => {
  * for someone holding a position it is equally actionable.
  */
 export const staleData: Detector = (ctx) => {
+  /*
+   * A closed market is not a data outage.
+   *
+   * Report inactivity rather than null, so that a stale-data episode opened
+   * during trading hours is properly closed once the market shuts - otherwise
+   * an alert raised at 15:55 would stay open all weekend.
+   */
+  if (ctx.freshness === 'closed') {
+    return inactive('stale_data', `${ctx.symbol} priced at the close`, {
+      asOf: ctx.quote.asOf,
+      marketState: 'closed',
+    });
+  }
+
   const age = ctx.now - ctx.quote.asOf;
   const limit = ctx.thresholds.staleMs;
   if (limit <= 0) return null;

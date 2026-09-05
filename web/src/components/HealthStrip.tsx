@@ -13,7 +13,8 @@ import { Chip, FreshnessDot } from './primitives.js';
 
 export function HealthStrip({ health }: { health: DataHealth }): React.JSX.Element {
   const degraded =
-    health.worstFreshness !== 'fresh' ||
+    // 'closed' is not degraded - the market being shut is not a fault.
+    (health.worstFreshness !== 'fresh' && health.worstFreshness !== 'closed') ||
     health.conflicted.length > 0 ||
     health.halted.length > 0 ||
     health.providers.some((p) => p.breaker !== 'closed');
@@ -23,7 +24,11 @@ export function HealthStrip({ health }: { health: DataHealth }): React.JSX.Eleme
       <FreshnessDot state={health.worstFreshness} label />
 
       {!degraded ? (
-        <span>All feeds healthy · prices current</span>
+        <span>
+          {health.worstFreshness === 'closed'
+            ? 'Market closed · showing the last closing prices'
+            : 'All feeds healthy · prices current'}
+        </span>
       ) : (
         <>
           {health.stale.length > 0 ? (

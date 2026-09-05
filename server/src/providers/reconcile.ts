@@ -26,20 +26,50 @@ export interface ReconcileOptions {
   /** How many bars of history this symbol has, for the confidence penalty. */
   bars?: number;
   minBarsForStats?: number;
+  /**
+   * Market state, so freshness can be judged against the *market's* clock
+   * rather than the wall clock. Without these, every price is "stale" all
+   * weekend even though nothing has traded to make it so.
+   */
+  marketOpen?: boolean;
+  /** Canonical timestamp of the last completed session. */
+  lastSessionCloseAt?: number;
 }
 
 export function classifyFreshness(
   asOf: number,
   now: number,
-  o: Pick<ReconcileOptions, 'freshMs' | 'delayedMs' | 'staleMs'>,
+  o: Pick<
+    ReconcileOptions,
+    'freshMs' | 'delayedMs' | 'staleMs' | 'marketOpen' | 'lastSessionCloseAt'
+  >,
 ): Freshness {
   const age = now - asOf;
+
   // A timestamp meaningfully in the future means a broken clock somewhere.
   // "unknown" is the honest label: we cannot place it on the ladder at all.
   if (age < -60_000) return 'unknown';
+
+  /*
+   * When the market is shut, age against the wall clock is meaningless.
+   *
+   * A price stamped at Friday's close is the correct, current, actionable
+   * price on Saturday - there has been no trading to miss. Judging it by
+   * wall-clock age marks it stale, which both cries wolf and suppresses the
+   * statistical analysis that is still perfectly valid.
+   *
+   * It is only genuinely stale if it predates the last completed session:
+   * that means we missed a whole session, which *is* a failure.
+   */
+  if (o.marketOpen === false && typeof o.lastSessionCloseAt === 'number') {
+    // A little grace, since the closing print can lag the bell slightly.
+    const GRACE_MS = 90 * 60_000;
+    if (asOf >= o.lastSessionCloseAt - GRACE_MS) return 'closed';
+    return 'stale';
+  }
+
   if (age <= o.freshMs) return 'fresh';
   if (age <= o.delayedMs) return 'delayed';
-  if (age <= o.staleMs) return 'stale';
   return 'stale';
 }
 
@@ -62,6 +92,9 @@ export function computeConfidence(args: {
 
   switch (args.freshness) {
     case 'fresh':
+      break;
+    // A closing price during a closed market is fully trustworthy.
+    case 'closed':
       break;
     case 'delayed':
       c *= 0.85;

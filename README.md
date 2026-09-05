@@ -6,7 +6,8 @@
 npm install && npm run dev     # → http://localhost:5173
 ```
 
-No database to install, no API keys, no configuration. It runs.
+**Live market data, no API key, no database to install, no configuration.**
+It fetches real prices and a real year of history the moment it starts.
 
 ---
 
@@ -129,7 +130,7 @@ auditable in one place rather than scattered as magic numbers.
 | `trend_flip` | 20/50-session average crossover | Slow, and therefore exactly what a returning user missed. |
 | `vol_regime` | 10-session vol ≥ 1.8× the 90-session baseline | "This name has become dangerous." |
 | `drawdown` | crossing a 10/20/30/50% bucket below the 52-week peak | Bucketed, so a two-month grind produces three signals, not thousands. |
-| `stale_data` | no fresh price beyond the staleness budget | **The absence of data is news.** See below. |
+| `stale_data` | no fresh price beyond the staleness budget, **and the market is open** | **The absence of data is news** — but only when there should have been data. |
 | `data_conflict` | providers disagree beyond tolerance | Surfaced, never silently resolved. |
 
 ### Two deliberate refusals
@@ -264,7 +265,7 @@ Postgres** ([PGlite](https://pglite.dev), Postgres compiled to WASM), so there
 is a real database with real Postgres semantics and nothing to install.
 
 ```bash
-npm test             # 186 tests
+npm test             # 297 tests (268 server, 29 web)
 npm run typecheck    # both workspaces
 npm run seed         # warm every instrument + a few ingest cycles
 npm run reset        # drop everything and reseed
@@ -285,15 +286,18 @@ Open **Lab** in the running app. It breaks the system on purpose:
 
 Resilience you cannot demonstrate is decoration. This is how you check.
 
-### Against a real market feed
+### Choosing a feed
 
 ```bash
-FINNHUB_API_KEY=… PROVIDERS=finnhub,synthetic npm run dev
+npm run dev                        # live Yahoo data (the default)
+PROVIDERS=synthetic npm run dev    # the deterministic simulator
+PROVIDERS=yahoo,finnhub npm run dev   # two live sources, real reconciliation
 ```
 
-Nothing else changes. The same registry wraps it in the same breaker, rate
-limiter and reconciliation; the same detectors consume its output. The
-simulator becomes the fallback for whatever the live feed cannot answer.
+Adding a second live source (`FINNHUB_API_KEY=…`) is what turns reconciliation
+from a code path into a demonstrated behaviour: two independent vendors quoting
+the same instrument, a recorded conflict when they disagree beyond tolerance,
+a median rather than the freshest, and a lowered confidence that the UI shows.
 
 ### In production
 
@@ -311,36 +315,74 @@ mattered enough to give up SQLite's convenience.
 
 ---
 
-## About the market data
+## The market data is real
 
-The default feed is a **simulator**, and the app says so, in the UI and in
-every quote's `source` field. The tickers are real so the demo reads naturally;
-**the prices are invented.**
+The default feed is **live Yahoo Finance data** — real prices, real daily
+history, real volumes — and it needs no API key and no signup.
 
-That is a deliberate product decision, not a shortcut. Every free market API is
-rate-limited into uselessness for a 30-symbol watchlist polled continuously,
-and half are unofficial endpoints that break without notice — so the reviewer's
-first experience would be an empty screen and a 429.
+That took some finding. Alpha Vantage allows 25 requests a *day*; Finnhub's
+free tier dropped daily candles; Stooq now sits behind a JavaScript
+proof-of-work challenge. For a product that needs a year of history per symbol
+before it can say anything at all, none of those work. Yahoo's chart endpoint
+returns a live quote *and* a year of daily bars in one call.
 
-More importantly, the interesting behaviour becomes reproducible. "Show me what
-a 4σ move looks like" is a button, not a wait for the right Tuesday.
+The catch, stated plainly: **it is an undocumented endpoint.** It can change or
+start refusing traffic without notice. That is not a reason to avoid it — it is
+the reason every provider in this project sits behind a circuit breaker, a rate
+limiter, single-flight coalescing and a fallback. The architecture assumes the
+upstream is unreliable, because this one is.
 
-The simulator is not noise. Returns have a genuine three-factor structure:
+Three things about that API that cost real debugging, all now handled:
 
+- **`chartPreviousClose` is not yesterday's close.** It is the close *before the
+  requested range began*, so at `range=1y` it is a year old. Using it would
+  report AAPL as **+33.9% every single day**. The correct previous close is the
+  prior bar, and the derivation is cross-checked against Yahoo's own reported
+  change percentage.
+- **The OHLCV arrays contain `null`s.** Halted sessions come back as nulls
+  inside otherwise-valid arrays; a naive `.map()` produces NaN prices that
+  poison every statistic downstream.
+- **One call answers both questions.** Quote and history share a payload, so
+  caching them separately doubles the request count for no benefit. Keying the
+  cache by symbol rather than by (symbol, range) halved it.
+
+### Two things a live feed forced the design to get right
+
+**A closed market is not stale data.** A Friday closing price read on Saturday
+is not a fetch we failed — it *is* the current price. Freshness is therefore
+measured against the *market's* clock, not the wall clock, and has its own
+`closed` state that neither cries wolf nor suppresses the analysis. Getting
+this wrong means a product that spends every weekend claiming to be broken.
+
+**History has to be replayed, or a new instance has nothing to say.** Detection
+runs on live quotes, so a freshly-seeded instance knows a year of prices and
+holds *no signals at all* — open it on a Saturday and the briefing is empty
+even though the week was eventful. So on startup the detectors are walked
+across the stored bars in chronological order, through the same episode state
+machine, with statistics computed as-of each session rather than from the full
+history. Real market history becomes a real signal timeline. It is idempotent,
+so restarting does not duplicate it.
+
+### The simulator is still there
+
+```bash
+PROVIDERS=synthetic npm run dev
 ```
-r = drift + β×market + β_sector×sector + idiosyncratic + jump
-```
 
-with volatility clustering, per-symbol jump intensities, and Brownian-bridge
-intraday paths that terminate exactly on each session's close. Because the
-market factor is real, **regressing the generated data recovers the betas it
-was generated from** — which is what makes "the market explains this" a claim
-the engine can verify rather than assert. There is a test for exactly that.
+A seeded three-factor market — `r = drift + β·market + β_sector·sector +
+idiosyncratic + jump`, with volatility clustering and Brownian-bridge intraday
+paths — running on a compressed clock where a session lasts 45 seconds.
 
-Everything is a pure function of `(seed, symbol, session)` — no accumulated
-state — so it survives restarts, answers out of order, and is reproducible.
+It earns its place for two reasons. It makes the failure modes *demonstrable*:
+the Lab page can shock a price, halt an instrument or make two sources disagree
+on demand, none of which you can ask a real exchange to do. And because the
+generated returns really do have the configured betas, a test can assert that
+regressing the simulated data **recovers them** — which is what makes "the
+market explains this move" a claim the engine can verify rather than assert.
 
----
+Live and simulated feeds are mutually exclusive, enforced at startup. Mixing
+them would reconcile a real $320 against a simulated $170 and report a
+permanent 47% disagreement.
 
 ## API
 

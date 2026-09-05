@@ -173,8 +173,20 @@ function Row({
       <td className="num">{money(row.quote?.price ?? null)}</td>
 
       {/* The primary column: the delta against the user's own checkpoint. */}
+      {/*
+        With a checkpoint this is the number the product is about. Without one
+        it falls back to the previous close - which is a sensible default but
+        makes this column identical to "Today", so it is dimmed and labelled to
+        read as a placeholder rather than as a second measurement.
+      */}
       <td>
-        <div className={`num val val-strong ${directionClass(since.changePct)}`}>
+        <div
+          className={
+            since.fromAt
+              ? `num val val-strong ${directionClass(since.changePct)}`
+              : 'num val-weak'
+          }
+        >
           {signedPct(since.changePct)}
         </div>
         {since.fromAt ? (
@@ -182,9 +194,7 @@ function Row({
             from {money(since.from)} · {ago(since.fromAt)}
           </div>
         ) : (
-          <div className="val-weak" style={{ fontSize: 11 }}>
-            vs previous close
-          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-4)' }}>no checkpoint yet</div>
         )}
       </td>
 

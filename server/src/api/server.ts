@@ -243,7 +243,15 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     const staticPlugin = await import('@fastify/static');
     const { resolve } = await import('node:path');
     const root = resolve(process.cwd(), process.env.WEB_ROOT ?? '../web/dist');
-    await fastify.register(staticPlugin.default, { root, wildcard: false });
+    /*
+     * `wildcard: true` (the default) resolves files per request. The
+     * alternative snapshots the directory at boot and registers a route per
+     * file, which means any asset written after startup 404s - and because the
+     * SPA fallback used to answer those with index.html, the symptom was a
+     * blank page and a MIME-type error rather than anything pointing at the
+     * cause.
+     */
+    await fastify.register(staticPlugin.default, { root, wildcard: true });
     serveStatic = true;
   }
 
@@ -259,12 +267,31 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
    * client-side routes survive a hard refresh.
    */
   fastify.setNotFoundHandler((req, reply) => {
-    if (!serveStatic || req.url.startsWith('/api')) {
+    const path = req.url.split('?')[0] ?? '';
+
+    /*
+     * Only *navigations* fall back to index.html.
+     *
+     * A blanket fallback is the obvious implementation and it is wrong: a
+     * request for a missing `/assets/index-abc123.js` gets index.html back,
+     * the browser refuses it with "expected a JavaScript module, got
+     * text/html", and the whole app renders blank with no clue in the network
+     * tab that anything 404'd. That happens for real whenever a client is
+     * holding a cached page that references assets a newer deploy has renamed.
+     *
+     * So anything that looks like a file, and anything that did not ask for
+     * HTML, gets an honest 404.
+     */
+    const looksLikeAsset = /\.[a-z0-9]+$/i.test(path);
+    const wantsHtml = (req.headers.accept ?? '').includes('text/html');
+
+    if (!serveStatic || path.startsWith('/api') || looksLikeAsset || !wantsHtml) {
       void reply.code(404).send({
-        error: { code: 'not_found', message: `no route for ${req.method} ${req.url}` },
+        error: { code: 'not_found', message: `no route for ${req.method} ${path}` },
       });
       return;
     }
+
     void reply.sendFile('index.html');
   });
 
