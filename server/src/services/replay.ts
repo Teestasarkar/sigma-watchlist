@@ -100,13 +100,31 @@ export class ReplayService {
    * move in March against volatility measured in September, which would make
    * every historical signal wrong in a direction that flatters us.
    */
-  async replaySymbol(symbol: string, benchmarkBars: readonly Bar[]): Promise<ReplayResult> {
+  async replaySymbol(
+    symbol: string,
+    benchmarkBars: readonly Bar[],
+    /**
+     * The instrument's sector proxy series, when it has one.
+     *
+     * Threaded through replay for the same reason it is threaded through live
+     * ingest: without it, every historical sector-wide repricing is recorded
+     * as idiosyncratic for every member, and those rows are what a returning
+     * user's first briefing is built from. A replay that disagrees with live
+     * detection is worse than no replay - the same event would read as company
+     * news on Monday and sector news on Tuesday.
+     */
+    sector?: { symbol: string; bars: readonly Bar[] } | null,
+  ): Promise<ReplayResult> {
     const bars = await this.market.getBars(symbol, 400);
     const result: ReplayResult = { symbol, sessionsReplayed: 0, signalsCreated: 0 };
 
     if (bars.length < this.opts.minHistory + 2) return result;
 
     const benchmarkByTs = new Map(benchmarkBars.map((b) => [b.ts, b]));
+    const sectorByTs = sector ? new Map(sector.bars.map((b) => [b.ts, b])) : null;
+    const sectorName = sector
+      ? ((await this.market.getInstrument(symbol))?.sector ?? null)
+      : null;
 
     const firstIndex = Math.max(this.opts.minHistory, bars.length - this.opts.sessions);
     const created: Signal[] = [];
@@ -119,7 +137,19 @@ export class ReplayService {
       const prefix = bars.slice(0, i);
       const benchmarkPrefix = benchmarkBars.filter((b) => b.ts < bar.ts);
 
-      const stats: InstrumentStats = computeStats(symbol, prefix, benchmarkPrefix, bar.ts);
+      const sectorPrefix = sector ? sector.bars.filter((b) => b.ts < bar.ts) : [];
+      const sectorSeries =
+        sector && sectorPrefix.length >= this.opts.minHistory
+          ? { symbol: sector.symbol, bars: sectorPrefix }
+          : null;
+
+      const stats: InstrumentStats = computeStats(
+        symbol,
+        prefix,
+        benchmarkPrefix,
+        bar.ts,
+        sectorSeries,
+      );
 
       // The benchmark's own bar for this session, so the market-adjusted
       // detector has something to subtract.
@@ -139,6 +169,16 @@ export class ReplayService {
             }
           : null;
 
+      // The sector's own bar for this session, so the decomposition has a
+      // sector return to attribute rather than falling back to market-only.
+      const sectorBar = sector ? sectorByTs?.get(bar.ts) : undefined;
+      const sectorPrev = sectorPrefix[sectorPrefix.length - 1];
+
+      const sectorInput =
+        sector && sectorBar && sectorPrev && sectorSeries
+          ? { quote: this.quoteFromBar(sectorBar, sectorPrev), name: sectorName ?? sector.symbol }
+          : null;
+
       const detected = await this.detection.detect({
         symbol,
         quote: this.quoteFromBar(bar, previous),
@@ -146,6 +186,7 @@ export class ReplayService {
         // A completed session's close is the definitive price for it.
         freshness: 'fresh',
         benchmark,
+        sector: sectorInput,
         // Detection timestamps land on the session, not on now, so the digest
         // orders them correctly and recency decay treats them as historical.
         now: bar.ts,
@@ -185,11 +226,37 @@ export class ReplayService {
       log.warn('replaying without a benchmark; market-adjusted signals will be absent');
     }
 
+    /*
+     * Sector proxy history, loaded once for the whole replay.
+     *
+     * Nine series rather than one per symbol - and the same bars are reused
+     * across every member of a sector, so this is the difference between nine
+     * queries and several hundred.
+     */
+    const proxies = await this.market.getSectorProxies();
+    const proxyBars = new Map<string, Bar[]>();
+    for (const proxySymbol of new Set(proxies.values())) {
+      proxyBars.set(proxySymbol, await this.market.getBars(proxySymbol, 400));
+    }
+
     const results: ReplayResult[] = [];
     for (const symbol of symbols) {
       if (symbol === benchmarkSymbol) continue;
       try {
-        results.push(await this.replaySymbol(symbol, benchmarkBars));
+        const instrument = await this.market.getInstrument(symbol);
+        const proxySymbol =
+          instrument && !instrument.isBenchmark && !instrument.isSectorProxy && instrument.sector
+            ? proxies.get(instrument.sector)
+            : undefined;
+        const bars = proxySymbol && proxySymbol !== symbol ? proxyBars.get(proxySymbol) : undefined;
+
+        results.push(
+          await this.replaySymbol(
+            symbol,
+            benchmarkBars,
+            bars && bars.length > 0 ? { symbol: proxySymbol as string, bars } : null,
+          ),
+        );
       } catch (err) {
         // One symbol failing must not abort the rest.
         log.error('replay failed', {

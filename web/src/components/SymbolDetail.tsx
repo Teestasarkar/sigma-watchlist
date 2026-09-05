@@ -24,6 +24,7 @@ import {
 } from '../lib/format.js';
 import { Banner, Chip, FreshnessDot, SigmaChip, Spinner, isIntegrityKind } from './primitives.js';
 import { Sparkline } from './Sparkline.js';
+import { Attribution } from './Briefing.js';
 
 interface Props {
   symbol: string;
@@ -216,6 +217,15 @@ export function SymbolDetail({
                       <div className="tl-when">{ago(s.detectedAt)}</div>
                       <div className="tl-body">
                         <div className="tl-head">{s.headline}</div>
+                        {/*
+                          * The same decomposition the briefing shows.
+                          *
+                          * Arguably it belongs here even more: this is the
+                          * screen someone opens to decide whether a move was
+                          * about the company, and that is exactly what the
+                          * three parts answer.
+                          */}
+                        <Attribution evidence={s.evidence} />
                         <div className="signal-meta" style={{ marginTop: 5 }}>
                           <Chip tone={isIntegrityKind(s.kind) ? 'info' : 'muted'}>
                             {kindLabel(s.kind)}

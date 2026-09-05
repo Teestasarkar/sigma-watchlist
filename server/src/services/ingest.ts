@@ -70,6 +70,16 @@ export interface BenchmarkSnapshot {
   symbol: string;
   quote: Quote;
   stats: InstrumentStats;
+  /**
+   * Live sector-proxy quotes, keyed by sector name.
+   *
+   * Loaded here for the same reason as the benchmark: every symbol in the
+   * batch needs one, and fetching per symbol would turn two queries into 2N.
+   * Nine sectors is a rounding error to carry; nine hundred lookups is not.
+   */
+  sectors: Map<string, { quote: Quote; name: string }>;
+  /** Sector name per instrument, so `refresh` needs no extra query. */
+  sectorOf: Map<string, string>;
 }
 
 export class IngestService {
@@ -150,6 +160,11 @@ export class IngestService {
    * Benchmark bars are joined in so beta and residual volatility are real
    * regressions rather than assumptions. When the symbol *is* the benchmark we
    * pass its own series, which correctly yields beta = 1.
+   *
+   * The instrument's sector proxy is joined in as a second factor where one
+   * exists. That is what separates "every semiconductor fell" from "this
+   * semiconductor fell" - without it a sector-wide repricing produces a
+   * near-identical idiosyncratic alarm for every member.
    */
   async recomputeStats(symbol: string, now: number): Promise<InstrumentStats | null> {
     const bars = await this.market.getBars(symbol, this.opts.historySessions);
@@ -161,9 +176,34 @@ export class IngestService {
         ? await this.market.getBars(benchmarkSymbol, this.opts.historySessions)
         : bars;
 
-    const stats = computeStats(symbol, bars, marketBars, now);
+    const stats = computeStats(symbol, bars, marketBars, now, await this.sectorSeries(symbol));
     await this.market.upsertStats(stats);
     return stats;
+  }
+
+  /**
+   * The sector proxy's bars for one instrument, or null if it has no factor.
+   *
+   * Null for the benchmark, for the proxies themselves (a series cannot be its
+   * own factor), and for anything whose sector has no proxy - all of which
+   * fall back to the single-factor model rather than failing.
+   */
+  private async sectorSeries(
+    symbol: string,
+  ): Promise<{ symbol: string; bars: readonly Bar[] } | null> {
+    const instrument = await this.market.getInstrument(symbol);
+    if (!instrument || instrument.isBenchmark || instrument.isSectorProxy) return null;
+    if (!instrument.sector) return null;
+
+    const proxy = (await this.market.getSectorProxies()).get(instrument.sector);
+    if (!proxy || proxy === symbol) return null;
+
+    const bars = await this.market.getBars(proxy, this.opts.historySessions);
+    // Too little overlap to identify a second factor. `computeStats` would
+    // reach the same conclusion, but skipping it here saves the work.
+    if (bars.length < 30) return null;
+
+    return { symbol: proxy, bars };
   }
 
   // ─────────────────────────────────────────────────── the refresh pass
@@ -253,6 +293,9 @@ export class IngestService {
     const stats = await this.market.getStats(symbol);
     const freshness = this.freshnessOf(effective, now);
 
+    const sectorName = benchmark?.sectorOf.get(symbol);
+    const sector = sectorName ? (benchmark?.sectors.get(sectorName) ?? null) : null;
+
     const detected = await this.detection.detect({
       symbol,
       quote: effective,
@@ -262,6 +305,7 @@ export class IngestService {
         benchmark && benchmark.symbol !== symbol
           ? { quote: benchmark.quote, stats: benchmark.stats }
           : null,
+      sector,
       now,
     });
 
@@ -344,11 +388,32 @@ export class IngestService {
   async benchmarkSnapshot(): Promise<BenchmarkSnapshot | null> {
     const symbol = await this.market.getBenchmarkSymbol();
     if (!symbol) return null;
-    const [quote, stats] = await Promise.all([
+
+    const [quote, stats, proxies, instruments] = await Promise.all([
       this.market.getQuote(symbol),
       this.market.getStats(symbol),
+      this.market.getSectorProxies(),
+      this.market.listInstruments(),
     ]);
     if (!quote || !stats) return null;
-    return { symbol, quote, stats };
+
+    const proxyQuotes = await this.market.getQuotes([...proxies.values()]);
+
+    const sectors = new Map<string, { quote: Quote; name: string }>();
+    for (const [sector, proxySymbol] of proxies) {
+      const q = proxyQuotes.get(proxySymbol);
+      // A proxy with no quote yet means that sector simply has no factor this
+      // cycle - the single-factor model, which is the previous behaviour.
+      if (q) sectors.set(sector, { quote: q, name: sector });
+    }
+
+    const sectorOf = new Map<string, string>();
+    for (const i of instruments) {
+      // The benchmark and the proxies are factors, not things with factors.
+      if (i.isBenchmark || i.isSectorProxy || !i.sector) continue;
+      if (sectors.has(i.sector)) sectorOf.set(i.symbol, i.sector);
+    }
+
+    return { symbol, quote, stats, sectors, sectorOf };
   }
 }

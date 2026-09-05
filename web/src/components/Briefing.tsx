@@ -220,6 +220,8 @@ function SignalRow({
           </button>
         </div>
 
+        <Attribution evidence={signal.evidence} />
+
         {expanded ? <Evidence kind={signal.kind} evidence={signal.evidence} /> : null}
       </div>
 
@@ -246,7 +248,7 @@ function Evidence({
   evidence,
 }: {
   kind: SignalKind;
-  evidence: Record<string, number | string | boolean>;
+  evidence: Record<string, number | string | boolean | null>;
 }): React.JSX.Element {
   const rows = Object.entries(evidence).filter(([, v]) => v !== null && v !== undefined);
 
@@ -274,7 +276,78 @@ function humanKey(key: string): string {
     .trim();
 }
 
-function formatEvidence(key: string, value: number | string | boolean): string {
+/**
+ * Where the move actually came from.
+ *
+ * The three parts sum to the total exactly, so this is a complete account
+ * rather than a selected fact - and that is what makes it worth showing. "You
+ * are down 4.2%: 1.1% was the market, 2.6% was every other semiconductor, and
+ * 0.5% was this company" is a different piece of information from "you are
+ * down 4.2%", and it is the one that decides whether to do anything.
+ *
+ * Rendered as a bar because the relative sizes are the whole point and reading
+ * three signed percentages off a list does not convey them.
+ */
+export function Attribution({
+  evidence,
+}: {
+  evidence: Record<string, number | string | boolean | null>;
+}): React.JSX.Element | null {
+  const num = (k: string): number | null => {
+    const v = evidence[k];
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  };
+
+  const market = num('marketPct');
+  const idio = num('idiosyncraticPct');
+  if (market === null || idio === null) return null;
+
+  const sector = num('sectorPct') ?? 0;
+  const sectorSymbol = typeof evidence.sectorSymbol === 'string' ? evidence.sectorSymbol : null;
+
+  const parts = [
+    { key: 'market', label: 'market', value: market, title: 'Explained by the benchmark' },
+    {
+      key: 'sector',
+      label: sectorSymbol ? `sector (${sectorSymbol})` : 'sector',
+      value: sector,
+      title: sectorSymbol
+        ? `Explained by the sector, after removing the market — measured against ${sectorSymbol}`
+        : 'Explained by the sector, after removing the market',
+    },
+    { key: 'idio', label: 'this company', value: idio, title: 'Left over: specific to this name' },
+  ].filter((p) => p.key !== 'sector' || sectorSymbol !== null);
+
+  // Share of the bar by magnitude, so an offsetting part still shows up.
+  const total = parts.reduce((a, p) => a + Math.abs(p.value), 0);
+  if (total <= 1e-9) return null;
+
+  return (
+    <div className="attribution" role="group" aria-label="What explains this move">
+      <div className="attribution-bar">
+        {parts.map((p) => (
+          <span
+            key={p.key}
+            className={`attribution-seg is-${p.key}${p.value < 0 ? ' is-down' : ''}`}
+            style={{ width: `${(Math.abs(p.value) / total) * 100}%` }}
+            title={`${p.title}: ${signedPct(p.value)}`}
+          />
+        ))}
+      </div>
+      <div className="attribution-keys">
+        {parts.map((p) => (
+          <span key={p.key} className={`attribution-key is-${p.key}`} title={p.title}>
+            <i aria-hidden="true" />
+            {p.label} {signedPct(p.value)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatEvidence(key: string, value: number | string | boolean | null): string {
+  if (value === null) return '—';
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   if (typeof value === 'string') return value;
   if (!Number.isFinite(value)) return '—';

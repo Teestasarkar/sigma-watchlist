@@ -19,6 +19,7 @@
  */
 
 import type { DigestGroup, ScoredSignal, Signal, SignalKind, WatchlistItem } from '../types.js';
+import { explainLearnedWeight } from './learning.js';
 
 /**
  * How much each kind of signal is worth, before severity and recency.
@@ -61,6 +62,11 @@ const DECAY_MULTIPLIER: Partial<Record<SignalKind, number>> = {
 
 export interface ScoringOptions {
   now: number;
+  /**
+   * Per-kind multipliers learned from this user's dismissals. Absent means
+   * "no evidence either way", which is exactly a multiplier of 1.
+   */
+  learned?: ReadonlyMap<SignalKind, number>;
   /** Half-life of the recency decay, in ms. */
   recencyHalfLifeMs: number;
   maxItems: number;
@@ -133,7 +139,16 @@ export function scoreSignal(
     };
   }
 
-  const weight = KIND_WEIGHT[signal.kind] ?? 0.5;
+  const baseWeight = KIND_WEIGHT[signal.kind] ?? 0.5;
+
+  /*
+   * What this user has told us about this kind.
+   *
+   * Bounded, and it multiplies - it cannot suppress. A learned preference
+   * demotes; only an explicit mute hides. See domain/signals/learning.ts.
+   */
+  const learned = opts.learned?.get(signal.kind) ?? 1;
+  const weight = baseWeight * learned;
   const age = Math.max(0, opts.now - signal.detectedAt);
   const decay = recencyFactor(age, opts.recencyHalfLifeMs, DECAY_MULTIPLIER[signal.kind] ?? 1);
 
@@ -151,7 +166,11 @@ export function scoreSignal(
 
   const parts: string[] = [];
   if (sigma !== null) parts.push(`${sigma.toFixed(1)}σ`);
-  parts.push(`${describeKind(signal.kind)} weight ${weight.toFixed(2)}`);
+  parts.push(`${describeKind(signal.kind)} weight ${baseWeight.toFixed(2)}`);
+  // Say so out loud. A ranking that quietly adapts is impossible to argue
+  // with; one that states its reason can be corrected by the next click.
+  const learnedNote = explainLearnedWeight(learned);
+  if (learnedNote) parts.push(learnedNote);
   if (decay < 0.9) parts.push(`${humanAge(age)} old`);
   if (item?.pinned) parts.push('pinned');
   if (!isIntegrity && confidence < 0.9) parts.push(`confidence ${(confidence * 100).toFixed(0)}%`);

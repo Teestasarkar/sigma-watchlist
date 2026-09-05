@@ -31,6 +31,12 @@ export const config = {
    * checkout works with no database to install. One dialect either way - see
    * docs/DECISIONS.md.
    */
+  /**
+   * Optional read replica. When set, the briefing and watchlist reads are
+   * routed to it and everything else stays on the primary - see
+   * db/replica.ts for the two rules that make that safe.
+   */
+  databaseReadUrl: process.env.DATABASE_READ_URL ?? '',
   databaseUrl: process.env.DATABASE_URL ?? '',
 
   /** Where embedded Postgres keeps its files. Omitted entirely in tests. */

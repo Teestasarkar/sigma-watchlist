@@ -439,6 +439,129 @@ production.
 
 ---
 
+## 15. Two factors, not one - and why the second is orthogonalised
+
+A market factor answers "did everything move?". It cannot answer "did every
+*bank* move?", and that is the question someone holding a bank stock actually
+has. Without a sector factor, a sector-wide repricing is idiosyncratic for
+every member: eight semiconductors fall on one piece of news and the briefing
+fires eight near-identical alarms, which is precisely the noise this product
+exists to remove.
+
+**Traded proxies, not baskets.** Each sector maps to a liquid ETF (XLK, XLF,
+SMH, XLE...). An equal-weighted basket of the members we happen to hold would
+change composition every time any user added a symbol, so the "sector factor"
+would mean something different from one day to the next and betas fitted
+against it would not be comparable across recomputes - or across users.
+
+**The sector factor is orthogonalised against the market before fitting.**
+Sector returns are strongly correlated with market returns, and regressing on
+two collinear factors gives unstable coefficients that flip sign between
+recomputes. Regressing sector on market and keeping only the residual removes
+that. It also has a property worth stating: because the residual factor is
+uncorrelated with the market by construction, the market beta comes out
+*identical* to the single-factor one. Adding a sector cannot silently change
+what `beta` means, and the three attributed parts sum to the total exactly.
+
+**It falls back rather than fitting noise.** Fewer than 30 overlapping
+observations, a missing session in the proxy series, or a sector with no proxy,
+and the model reverts to one factor - which is exactly the previous behaviour.
+`betaSector` is nullable for the same reason: an unfitted loading is an
+absence, not a zero.
+
+Fitted against real data, the loadings are recognisable: JPM 1.12 on XLF, XOM
+1.05 on XLE, KO 0.90 on XLP. NVDA loads only 0.44 on SMH, which is right - it
+is a fifth of that index, so it is largely explaining itself.
+
+---
+
+## 16. Learning from dismissals, without letting it hide anything
+
+Dismissals were recorded and never read. That is the worst of both worlds: a
+user could tell us the same thing a hundred times and be ignored.
+
+The fix is riskier than the bug, and the design is mostly about that. A feed
+that quietly decides what you care about, on evidence you cannot see, is a feed
+you cannot trust to have shown you the one that mattered. So:
+
+- **It adjusts weight, never visibility.** Bounded to [0.5, 1.15] and
+  multiplicative. Only an explicit mute hides anything.
+- **It needs evidence before it moves.** A shrunk dismissal rate with a prior
+  of 30: three dismissals move the weight 4%, fifty move it 31%. An earlier
+  version used a prior of 8, which moved 14% on three clicks - a test caught
+  the gap between the code and the comment describing it.
+- **It is asymmetric.** Demoting something waved away repeatedly is low-risk;
+  promoting on two clicks is how a recommender collapses.
+- **Engagement is the counterweight.** Opening a symbol that carries live
+  signals counts. Without it the model cannot distinguish "this kind is noise"
+  from "this kind is rare".
+- **Integrity signals are exempt.** `stale_data`, `data_conflict` and
+  `corporate_action` are never learned away.
+- **It is legible and reversible.** The rank line says *"you usually dismiss
+  these (×0.71)"*, `GET /api/preferences/learned` shows the tally, and a reset
+  endpoint clears it.
+
+It lives entirely in the read path, like the watermark - detection stays
+global, so learning costs nothing per symbol.
+
+---
+
+## 17. Notifications: every rule is a rule about not notifying
+
+The engine already knows what is worth interrupting someone for, and the
+episode machine already guarantees one signal per episode. Those were the hard
+parts. The remaining risk is being annoying: a watchlist that pushes for every
+wobble has its permission revoked within a day, and then cannot tell the user
+the one thing that mattered.
+
+So the surface is deliberately conservative. A severity floor, with integrity
+warnings always passing. Nothing at all while the tab is visible - the briefing
+is already updating in front of them. Once per episode, remembered across
+reloads. A ceiling of six per hour, past which they collapse into one summary,
+because a market-wide event would otherwise produce a dozen at once. Off until
+asked for, from a click, so nobody meets a permission dialog on first load.
+
+And it primes silently on first load: without that, opening the app after a
+weekend fires a notification for everything that happened while it was closed.
+
+Delivery is the browser's Notification API over the existing SSE stream, so it
+works with no third-party service and no key. The boundary is honest and stated
+in the README: the tab has to be open. True background push needs a service
+worker and VAPID keys; none of the decision logic above would change.
+
+---
+
+## 18. Making "it would move to a replica" true
+
+The read path was always batched and index-only, so the claim that it could
+move to a replica was defensible - and unverifiable. The gap between "would
+work" and "works" is usually a write hiding inside something that looks like a
+read.
+
+`DATABASE_READ_URL` now routes reads to a replica, with three rules:
+
+1. **A transaction never splits.** Everything inside `tx()` goes to the
+   primary. A replica read inside a write transaction sees a snapshot from
+   before its own uncommitted writes - a bug that reproduces once a week and
+   never in a test. The test for this uses a real client, because the guard
+   reads AsyncLocalStorage that only the real implementation sets.
+2. **The classifier is conservative.** A statement must start with SELECT and
+   contain no writing keyword. `INSERT ... RETURNING` reads like a read at the
+   call site and is not one; `SELECT ... FOR UPDATE` - which the ingest queue
+   depends on - takes a lock a replica cannot grant. A false negative costs a
+   query; a false positive corrupts data.
+3. **Only market data is routed.** The split follows who writes the row.
+   Quotes, bars and signals are written by ingest, are already a snapshot of a
+   moving market, and are the heavy queries worth moving. Watchlists,
+   checkpoints and learned weights are written by the user's own request and
+   read back immediately, so they stay on the primary. No request ever reads
+   back its own write from a replica, which means no staleness bound is needed.
+
+With no replica configured, `maybeWithReplica` returns the primary itself - so
+the default deployment has one pool and no per-query branch.
+
+---
+
 ## 11. No state-management library on the frontend
 
 **Decision.** `useState`, one `load()` function, a 20-line hash router.

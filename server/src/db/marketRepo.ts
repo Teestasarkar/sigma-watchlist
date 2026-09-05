@@ -19,6 +19,7 @@ export interface InstrumentRow {
   sector: string | null;
   status: 'active' | 'delisted' | 'unknown';
   isBenchmark: boolean;
+  isSectorProxy: boolean;
   firstSeenAt: number;
 }
 
@@ -32,6 +33,7 @@ const mapInstrument = (r: Row): InstrumentRow => ({
   sector: (r.sector as string | null) ?? null,
   status: r.status as InstrumentRow['status'],
   isBenchmark: b(r.is_benchmark),
+  isSectorProxy: b(r.is_sector_proxy),
   firstSeenAt: n(r.first_seen_at),
 });
 
@@ -74,6 +76,9 @@ const mapStats = (r: Row): InstrumentStats => ({
   sigmaShort: n(r.sigma_short),
   atrPct: n(r.atr_pct),
   beta: n(r.beta),
+  betaSector: nOrNull(r.beta_sector),
+  sectorSymbol: (r.sector_symbol as string | null) ?? null,
+  sectorMarketBeta: nOrNull(r.sector_market_beta),
   residSigma: n(r.resid_sigma),
   hi52w: n(r.hi_52w),
   lo52w: n(r.lo_52w),
@@ -107,16 +112,19 @@ export class MarketRepo {
     currency?: string;
     sector?: string | null;
     isBenchmark?: boolean;
+    isSectorProxy?: boolean;
     now: number;
   }): Promise<void> {
     await this.sql.query(
       `INSERT INTO instruments
-         (symbol, name, exchange, currency, sector, status, is_benchmark, first_seen_at)
-       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
+         (symbol, name, exchange, currency, sector, status, is_benchmark,
+          is_sector_proxy, first_seen_at)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)
        ON CONFLICT (symbol) DO UPDATE SET
          name     = excluded.name,
          exchange = COALESCE(excluded.exchange, instruments.exchange),
          sector   = COALESCE(excluded.sector, instruments.sector),
+         is_sector_proxy = excluded.is_sector_proxy,
          status   = 'active'`,
       [
         i.symbol,
@@ -125,6 +133,7 @@ export class MarketRepo {
         i.currency ?? 'USD',
         i.sector ?? null,
         i.isBenchmark ?? false,
+        i.isSectorProxy ?? false,
         i.now,
       ],
     );
@@ -156,6 +165,9 @@ export class MarketRepo {
     const rows = await this.sql.query<Row>(
       `SELECT * FROM instruments
        WHERE NOT is_benchmark
+         -- Sector proxies are polled and have statistics, but they are
+         -- machinery, not something anyone means to watch.
+         AND NOT is_sector_proxy
          AND (symbol LIKE $1 OR UPPER(name) LIKE $1)
        ORDER BY
          CASE WHEN symbol = $2 THEN 0
@@ -170,6 +182,21 @@ export class MarketRepo {
 
   async markStatus(symbol: string, status: InstrumentRow['status']): Promise<void> {
     await this.sql.query(`UPDATE instruments SET status = $1 WHERE symbol = $2`, [status, symbol]);
+  }
+
+  /**
+    * Sector proxy symbols, keyed by the sector they stand for.
+    *
+    * Read from the database rather than the static map so a proxy that failed
+    * to seed simply does not appear - the sector factor is then absent for
+    * that sector, which is the honest outcome, rather than every regression
+    * against it silently returning no overlap.
+    */
+  async getSectorProxies(): Promise<Map<string, string>> {
+    const rows = await this.sql.query<Row>(
+      `SELECT symbol, sector FROM instruments WHERE is_sector_proxy AND sector IS NOT NULL`,
+    );
+    return new Map(rows.map((r) => [r.sector as string, r.symbol as string]));
   }
 
   async getBenchmarkSymbol(): Promise<string | null> {
@@ -381,8 +408,9 @@ export class MarketRepo {
     await this.sql.query(
       `INSERT INTO instrument_stats
          (symbol, computed_at, bars, sigma_daily, sigma_short, atr_pct, beta,
-          resid_sigma, hi_52w, lo_52w, hi_30d, lo_30d, med_vol_20, sma_20, sma_50, peak_52w)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          resid_sigma, hi_52w, lo_52w, hi_30d, lo_30d, med_vol_20, sma_20, sma_50, peak_52w,
+          beta_sector, sector_symbol, sector_market_beta)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        ON CONFLICT (symbol) DO UPDATE SET
          computed_at = excluded.computed_at,
          bars        = excluded.bars,
@@ -398,7 +426,10 @@ export class MarketRepo {
          med_vol_20  = excluded.med_vol_20,
          sma_20      = excluded.sma_20,
          sma_50      = excluded.sma_50,
-         peak_52w    = excluded.peak_52w`,
+         peak_52w    = excluded.peak_52w,
+         beta_sector = excluded.beta_sector,
+         sector_symbol = excluded.sector_symbol,
+         sector_market_beta = excluded.sector_market_beta`,
       [
         s.symbol,
         s.computedAt,
@@ -416,6 +447,9 @@ export class MarketRepo {
         s.sma20,
         s.sma50,
         s.peak52w,
+        s.betaSector,
+        s.sectorSymbol,
+        s.sectorMarketBeta,
       ],
     );
   }

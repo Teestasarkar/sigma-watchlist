@@ -15,6 +15,8 @@ import { requireUser, withIdempotency } from '../server.js';
 import { SymbolNotFoundError } from '../../providers/types.js';
 import { ALL_SIGNAL_KINDS } from '../../services/detection.js';
 import { KIND_WEIGHT } from '../../domain/signals/scoring.js';
+import type { SignalKind } from '../../domain/types.js';
+import { explainLearnedWeight, learnedWeight } from '../../domain/signals/learning.js';
 
 const Symbol_ = z
   .string()
@@ -132,9 +134,63 @@ export async function registerCoreRoutes(fastify: FastifyInstance, app: App): Pr
     // reference deleted signals and quietly accumulate junk.
     const existing = await app.signals.existingIds(body.signalIds);
     const valid = body.signalIds.filter((id) => existing.has(id));
-    const marked = await app.users.markSignalsRead(user.id, valid, app.clock.now());
+    const now = app.clock.now();
+    const marked = await app.users.markSignalsRead(user.id, valid, now);
+
+    /*
+     * Learn from it.
+     *
+     * A dismissal was previously recorded and never read, which meant a user
+     * could tell us the same thing a hundred times and be ignored. Counted by
+     * kind, it becomes a bounded weight on the ranking - see
+     * domain/signals/learning.ts for why it can demote but never hide.
+     */
+    const kinds = await app.feedback.kindsOf(valid);
+    const byKind = new Map<SignalKind, number>();
+    for (const id of valid) {
+      const kind = kinds.get(id);
+      if (kind) byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+    }
+    await app.feedback.recordDismissals(user.id, byKind, now);
+
     return { marked, ignored: body.signalIds.length - valid.length };
   });
+
+  /**
+   * What the ranking has learned about you, and how to undo it.
+   *
+   * Both halves matter. An inferred preference a user cannot see is unnerving;
+   * one they cannot reset is a trap. This is also the honest answer to "why is
+   * this ranked where it is?" - the rationale line says which way, and this
+   * says how far.
+   */
+  fastify.get('/api/preferences/learned', async (req) => {
+    const user = requireUser(req);
+    const feedback = await app.feedback.forUser(user.id);
+
+    return {
+      kinds: feedback
+        .map((f) => {
+          const weight = learnedWeight(f);
+          return {
+            kind: f.kind,
+            dismissed: f.dismissed,
+            engaged: f.engaged,
+            weight,
+            note: explainLearnedWeight(weight),
+          };
+        })
+        // Only the ones that actually changed something.
+        .filter((k) => k.note !== null)
+        .sort((a, b) => a.weight - b.weight),
+    };
+  });
+
+  fastify.post('/api/preferences/learned/reset', async (req) => {
+    const user = requireUser(req);
+    return { cleared: await app.feedback.reset(user.id) };
+  });
+
 
   // ─────────────────────────────────────────────────── watchlists
 
@@ -330,6 +386,21 @@ export async function registerCoreRoutes(fastify: FastifyInstance, app: App): Pr
     // promote it and pull its next poll forward.
     await app.jobs.touchActivity([symbol], now);
     await app.jobs.expedite(symbol, now);
+
+    /*
+     * Opening a symbol that had live signals is the counterweight to a
+     * dismissal.
+     *
+     * Without it the model can only ever learn "this kind is noise", and it
+     * would confuse that with "this kind is rare" - a kind that fires twice a
+     * year and is opened both times would be demoted alongside one that fires
+     * hourly and is always waved away. Only unsuperseded signals count: an
+     * episode that closed last week is not why they clicked.
+     */
+    const liveKinds = signals.filter((sig) => sig.supersededAt === null).map((sig) => sig.kind);
+    if (liveKinds.length > 0) {
+      await app.feedback.recordEngagement(user.id, liveKinds, now);
+    }
 
     return {
       instrument,

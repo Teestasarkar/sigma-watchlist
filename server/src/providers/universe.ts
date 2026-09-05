@@ -101,7 +101,63 @@ export const UNIVERSE: UniverseEntry[] = [
   { symbol: 'SO',    name: 'Southern Co.',              sector: 'Utilities',  basePrice: 88,   annualVol: 0.14, beta: 0.40, sectorBeta: 0.85, drift: 0.03,  baseVolume: 4_200_000,  jumpProb: 0.006, jumpScale: 0.018 },
 ];
 
-export const ALL_ENTRIES: UniverseEntry[] = [BENCHMARK, ...UNIVERSE];
+/**
+ * A liquid, real ETF standing in for each sector.
+ *
+ * Using a traded proxy rather than an equal-weighted basket of the members we
+ * happen to hold is the important choice. A basket's composition changes every
+ * time a user adds or removes a symbol, so the "sector factor" would silently
+ * mean something different from one day to the next, and betas fitted against
+ * it would not be comparable across recomputes - or across users. These ETFs
+ * are the same series for everyone, every day, and they price continuously.
+ *
+ * `Index` maps to nothing: the benchmark *is* the market factor, and
+ * regressing it on itself would be circular.
+ */
+export const SECTOR_PROXIES: Readonly<Record<string, string>> = {
+  Technology: 'XLK',
+  Semis: 'SMH',
+  Consumer: 'XLY',
+  Financials: 'XLF',
+  Healthcare: 'XLV',
+  Energy: 'XLE',
+  Staples: 'XLP',
+  Utilities: 'XLU',
+  // Crypto-linked equities track bitcoin far more closely than any equity
+  // sector, so the honest proxy is a bitcoin fund rather than a tech ETF.
+  Crypto: 'IBIT',
+};
+
+/** Every distinct sector proxy symbol, for seeding and polling. */
+export const SECTOR_PROXY_SYMBOLS: string[] = [...new Set(Object.values(SECTOR_PROXIES))];
+
+export function sectorProxyFor(sector: string | null | undefined): string | null {
+  if (!sector) return null;
+  return SECTOR_PROXIES[sector] ?? null;
+}
+
+/**
+ * Synthetic definitions for the sector proxies.
+ *
+ * The simulator needs a price path for these too, or switching to
+ * `PROVIDERS=synthetic` would lose the sector factor entirely and the two
+ * feeds would no longer exercise the same code. Vol and beta are set to what
+ * a broad sector fund actually behaves like: less volatile than its members,
+ * beta near one, and a high sector loading because it *is* the sector.
+ */
+const SECTOR_PROXY_ENTRIES: UniverseEntry[] = [
+  { symbol: 'XLK',  name: 'Technology Select Sector SPDR', sector: 'Technology', basePrice: 218, annualVol: 0.20, beta: 1.15, sectorBeta: 0.95, drift: 0.12, baseVolume: 8_000_000, jumpProb: 0.006, jumpScale: 0.018 },
+  { symbol: 'SMH',  name: 'VanEck Semiconductor ETF',      sector: 'Semis',      basePrice: 236, annualVol: 0.32, beta: 1.45, sectorBeta: 0.96, drift: 0.18, baseVolume: 6_500_000, jumpProb: 0.010, jumpScale: 0.030 },
+  { symbol: 'XLY',  name: 'Consumer Discretionary SPDR',   sector: 'Consumer',   basePrice: 192, annualVol: 0.19, beta: 1.12, sectorBeta: 0.94, drift: 0.08, baseVolume: 5_200_000, jumpProb: 0.006, jumpScale: 0.017 },
+  { symbol: 'XLF',  name: 'Financial Select Sector SPDR',  sector: 'Financials', basePrice: 46,  annualVol: 0.17, beta: 1.00, sectorBeta: 0.95, drift: 0.07, baseVolume: 38_000_000, jumpProb: 0.005, jumpScale: 0.015 },
+  { symbol: 'XLV',  name: 'Health Care Select Sector SPDR',sector: 'Healthcare', basePrice: 148, annualVol: 0.14, beta: 0.72, sectorBeta: 0.93, drift: 0.05, baseVolume: 9_100_000, jumpProb: 0.005, jumpScale: 0.014 },
+  { symbol: 'XLE',  name: 'Energy Select Sector SPDR',     sector: 'Energy',     basePrice: 92,  annualVol: 0.24, beta: 0.78, sectorBeta: 0.95, drift: 0.04, baseVolume: 16_000_000, jumpProb: 0.008, jumpScale: 0.022 },
+  { symbol: 'XLP',  name: 'Consumer Staples Select SPDR',  sector: 'Staples',    basePrice: 80,  annualVol: 0.12, beta: 0.55, sectorBeta: 0.92, drift: 0.04, baseVolume: 11_000_000, jumpProb: 0.004, jumpScale: 0.012 },
+  { symbol: 'XLU',  name: 'Utilities Select Sector SPDR',  sector: 'Utilities',  basePrice: 78,  annualVol: 0.15, beta: 0.48, sectorBeta: 0.94, drift: 0.05, baseVolume: 13_000_000, jumpProb: 0.005, jumpScale: 0.016 },
+  { symbol: 'IBIT', name: 'iShares Bitcoin Trust',         sector: 'Crypto',     basePrice: 54,  annualVol: 0.62, beta: 1.55, sectorBeta: 0.98, drift: 0.20, baseVolume: 42_000_000, jumpProb: 0.026, jumpScale: 0.070 },
+];
+
+export const ALL_ENTRIES: UniverseEntry[] = [BENCHMARK, ...SECTOR_PROXY_ENTRIES, ...UNIVERSE];
 
 const BY_SYMBOL = new Map(ALL_ENTRIES.map((e) => [e.symbol, e]));
 

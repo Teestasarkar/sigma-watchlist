@@ -18,6 +18,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, getToken } from './lib/api.js';
 import { connectStream, type StreamStatus } from './lib/stream.js';
+import {
+  notifyFromDigest,
+  notificationsEnabled,
+  notifyPermission,
+  primeSeen,
+  requestNotificationPermission,
+  setNotificationsEnabled,
+  type NotifyPermission,
+} from './lib/notify.js';
 import type { Digest, Meta, User, WatchRow, Watchlist } from './lib/types.js';
 import { Briefing } from './components/Briefing.js';
 import { WatchTable } from './components/WatchTable.js';
@@ -67,6 +76,8 @@ export default function App(): React.JSX.Element {
   const [busySymbols, setBusySymbols] = useState<Set<string>>(new Set());
   const [canUndo, setCanUndo] = useState(false);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('connecting');
+  const [notifyOn, setNotifyOn] = useState(() => notificationsEnabled());
+  const [notifyPerm, setNotifyPerm] = useState<NotifyPermission>(() => notifyPermission());
 
   // Guards against a slow response from a previous view overwriting a newer one.
   const loadSeq = useRef(0);
@@ -76,6 +87,8 @@ export default function App(): React.JSX.Element {
    * render would defeat the point and hammer the ticket endpoint.
    */
   const loadRef = useRef<() => Promise<void>>(async () => undefined);
+  /** False until the first briefing has been absorbed silently. */
+  const primedRef = useRef(false);
   /*
    * The symbols this user actually watches.
    *
@@ -107,6 +120,22 @@ export default function App(): React.JSX.Element {
       const [d, w] = await Promise.all([api.digest(), api.rows('all')]);
       // A newer load started while this one was in flight; discard it.
       if (seq !== loadSeq.current) return;
+
+      /*
+       * Notify about what is new since the last load - but never about the
+       * first one.
+       *
+       * Opening the app after a weekend would otherwise fire a notification
+       * for everything that happened while it was closed: a storm, and a
+       * pointless one, because the user is looking straight at the list.
+       */
+      if (primedRef.current) {
+        notifyFromDigest(d, { onClick: (symbol) => navigate({ name: 'symbol', symbol }) });
+      } else {
+        primeSeen(d);
+        primedRef.current = true;
+      }
+
       setDigest(d);
       setRows(w.rows);
       setError(null);
@@ -262,6 +291,39 @@ export default function App(): React.JSX.Element {
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [booting, load, streamStatus]);
+
+  /**
+   * Turn notifications on or off.
+   *
+   * The permission prompt must come from a click - browsers ignore a request
+   * that is not tied to a user gesture - which is why this is a handler rather
+   * than something that runs on load.
+   */
+  const toggleNotifications = async (): Promise<void> => {
+    if (notifyOn) {
+      setNotificationsEnabled(false);
+      setNotifyOn(false);
+      flash('Notifications off. The briefing still collects everything.');
+      return;
+    }
+
+    const perm = await requestNotificationPermission();
+    setNotifyPerm(perm);
+
+    if (perm !== 'granted') {
+      flash(
+        perm === 'denied'
+          ? 'Your browser is blocking notifications for this site. Re-allow them in its site settings.'
+          : 'Notifications are not available in this browser.',
+      );
+      return;
+    }
+
+    setNotificationsEnabled(true);
+    setNotifyOn(true);
+    // Say what it will and will not do, so nobody is surprised either way.
+    flash('Notifications on. Only high-severity changes, and never while this tab is open.');
+  };
 
   const flash = (message: string): void => {
     setNotice(message);
@@ -430,6 +492,11 @@ export default function App(): React.JSX.Element {
           meta={null}
           user={null}
           stream={streamStatus}
+          notifications={{
+            on: notifyOn,
+            permission: notifyPerm,
+            toggle: () => void toggleNotifications(),
+          }}
           onSignOut={signOut}
         />
         <main className="shell" style={{ paddingTop: 60, display: 'flex', justifyContent: 'center' }}>
@@ -457,6 +524,11 @@ export default function App(): React.JSX.Element {
         meta={meta}
         user={user}
         stream={streamStatus}
+        notifications={{
+          on: notifyOn,
+          permission: notifyPerm,
+          toggle: () => void toggleNotifications(),
+        }}
         onSignOut={signOut}
       />
 
@@ -553,6 +625,7 @@ function Header({
   meta,
   user,
   stream,
+  notifications,
   onSignOut,
 }: {
   view: View;
@@ -561,6 +634,11 @@ function Header({
   meta: Meta | null;
   user: User | null;
   stream: StreamStatus;
+  notifications: {
+    on: boolean;
+    permission: NotifyPermission;
+    toggle: () => void;
+  };
   onSignOut: () => void;
 }): React.JSX.Element {
   return (
@@ -596,6 +674,7 @@ function Header({
         {user ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <LiveDot status={stream} />
+            <BellToggle on={notifications.on} permission={notifications.permission} onToggle={notifications.toggle} />
             <span
               className="num"
               style={{ fontSize: 12, color: 'var(--text-3)' }}
@@ -638,5 +717,56 @@ function LiveDot({ status }: { status: StreamStatus }): React.JSX.Element {
       <i aria-hidden="true" />
       <span className="live-dot-text">{status === 'live' ? 'Live' : status === 'connecting' ? '…' : 'Polling'}</span>
     </span>
+  );
+}
+
+/**
+ * The notification switch.
+ *
+ * A single icon button rather than a settings page, because there is exactly
+ * one decision to make. The title carries the honest description of what it
+ * does - a severity floor, silent while the tab is open - so nobody has to
+ * turn it on to find out whether it will be annoying.
+ */
+function BellToggle({
+  on,
+  permission,
+  onToggle,
+}: {
+  on: boolean;
+  permission: NotifyPermission;
+  onToggle: () => void;
+}): React.JSX.Element | null {
+  // Nothing to offer, so offer nothing. A dead control is worse than none.
+  if (permission === 'unsupported') return null;
+
+  const blocked = permission === 'denied';
+  const label = blocked
+    ? 'Your browser is blocking notifications for this site'
+    : on
+      ? 'Notifications on · only significant changes, and never while this tab is open'
+      : 'Notify me when something significant changes';
+
+  return (
+    <button
+      type="button"
+      className={`bell${on ? ' is-on' : ''}${blocked ? ' is-blocked' : ''}`}
+      onClick={onToggle}
+      title={label}
+      aria-label={label}
+      aria-pressed={on}
+    >
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+        <path
+          d="M8 1.6a3.6 3.6 0 0 0-3.6 3.6v2.3L3.2 10.2h9.6l-1.2-2.7V5.2A3.6 3.6 0 0 0 8 1.6Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+        />
+        <path d="M6.4 12a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        {blocked ? <path d="M2 14 14 2" stroke="currentColor" strokeWidth="1.3" /> : null}
+      </svg>
+    </button>
   );
 }

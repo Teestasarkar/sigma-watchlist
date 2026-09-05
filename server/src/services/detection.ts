@@ -37,6 +37,11 @@ export interface DetectionInput {
   stats: InstrumentStats | null;
   freshness: Freshness;
   benchmark: { quote: Quote; stats: InstrumentStats } | null;
+  /**
+   * The instrument's sector proxy, when it has one. Optional so callers that
+   * predate the sector factor keep working and get the single-factor model.
+   */
+  sector?: { quote: Quote; name: string } | null;
   now: number;
 }
 
@@ -55,7 +60,7 @@ export class DetectionEngine {
   ) {}
 
   async detect(input: DetectionInput): Promise<DetectionResult> {
-    const { symbol, quote, stats, freshness, benchmark, now } = input;
+    const { symbol, quote, stats, freshness, benchmark, sector, now } = input;
 
     const ctx: DetectorContext = {
       symbol,
@@ -65,6 +70,7 @@ export class DetectionEngine {
       freshness,
       clock: this.clock,
       benchmark,
+      sector: sector ?? null,
       thresholds: this.thresholds,
     };
 

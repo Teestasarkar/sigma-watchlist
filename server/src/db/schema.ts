@@ -24,7 +24,7 @@
  *     disjoint batches without coordination.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -334,8 +334,64 @@ CREATE INDEX IF NOT EXISTS idx_actions_pending
   ON corporate_actions(symbol) WHERE NOT applied;
 `;
 
+/**
+ * V4: a sector factor, and per-user weights learned from dismissals.
+ *
+ * Two additions that share a migration because both are read-path
+ * personalisation and neither touches existing rows.
+ *
+ * **Sector factor.** One market factor cannot tell "every bank moved" from
+ * "this bank moved", so a sector-wide repricing fires a near-identical alarm
+ * for every member. Sector proxies are ordinary instruments flagged so they
+ * stay out of search and watchlists.
+ *
+ * **Dismissal weights.** Dismissals were already recorded and never read,
+ * which meant a user could tell us the same thing a hundred times and be
+ * ignored. Weights are per (user, kind) and belong to the read path, exactly
+ * like the watermark.
+ */
+export const SCHEMA_V4 = `
+-- Sector proxies (XLK, XLF, SMH...) are real instruments that must be polled
+-- and have statistics, but must never appear in a search result or be added
+-- to a watchlist. A flag rather than a separate table: they are the same kind
+-- of thing as the benchmark, which is already flagged this way.
+ALTER TABLE instruments ADD COLUMN IF NOT EXISTS is_sector_proxy BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_instruments_sector_proxy
+  ON instruments(sector) WHERE is_sector_proxy;
+
+-- Sensitivity to the sector factor, after the market factor has been removed
+-- from it. Nullable: an instrument with no sector, or too little overlapping
+-- history to identify two factors, honestly has no sector beta - and 0 would
+-- be a claim rather than an absence.
+ALTER TABLE instrument_stats ADD COLUMN IF NOT EXISTS beta_sector DOUBLE PRECISION;
+-- Which series that beta was measured against, so a later sector reassignment
+-- is detectable rather than silently changing what the number means.
+ALTER TABLE instrument_stats ADD COLUMN IF NOT EXISTS sector_symbol TEXT;
+-- The sector proxy own market beta, needed to reproduce the orthogonalisation
+-- at read time without refitting.
+ALTER TABLE instrument_stats ADD COLUMN IF NOT EXISTS sector_market_beta DOUBLE PRECISION;
+
+-- What a user has told us by dismissing things.
+--
+-- Deliberately a running tally rather than a log: the log already exists in
+-- signal_reads, and what the scorer needs is one cheap lookup per user, not an
+-- aggregate over history on every read.
+CREATE TABLE IF NOT EXISTS user_kind_weights (
+  user_id     TEXT   NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind        TEXT   NOT NULL,
+  -- Times a signal of this kind was dismissed individually, and times one was
+  -- acted on (opened). Both are needed: dismissals alone cannot distinguish
+  -- "this kind is noise" from "this kind is rare".
+  dismissed   INTEGER NOT NULL DEFAULT 0,
+  engaged     INTEGER NOT NULL DEFAULT 0,
+  updated_at  BIGINT  NOT NULL,
+  PRIMARY KEY (user_id, kind)
+);
+`;
+
 export const MIGRATIONS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
   { version: 1, name: 'initial', sql: SCHEMA_V1 },
   { version: 2, name: 'credentials', sql: SCHEMA_V2 },
   { version: 3, name: 'corporate-actions', sql: SCHEMA_V3 },
+  { version: 4, name: 'sector-factor-and-learned-weights', sql: SCHEMA_V4 },
 ];

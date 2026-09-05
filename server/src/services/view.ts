@@ -35,6 +35,8 @@ import type {
 import type { MarketClock } from '../domain/marketClock.js';
 import { sigmaOfMove } from '../domain/stats.js';
 import { rankSignals } from '../domain/signals/scoring.js';
+import { learnedWeights } from '../domain/signals/learning.js';
+import type { FeedbackRepo } from '../db/feedbackRepo.js';
 import { classifyFreshness } from '../providers/reconcile.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { InstrumentRow, MarketRepo } from '../db/marketRepo.js';
@@ -72,6 +74,7 @@ export class ViewService {
     private readonly signals: SignalRepo,
     private readonly jobs: IngestRepo,
     private readonly registry: ProviderRegistry,
+    private readonly feedback: FeedbackRepo,
     private readonly clock: MarketClock,
     private readonly opts: ViewOptions,
   ) {}
@@ -177,10 +180,20 @@ export class ViewService {
       names.set(symbol, snap.instruments.get(symbol)?.name ?? symbol);
     }
 
+    /*
+     * What this user has told us by dismissing things.
+     *
+     * One indexed lookup, at read time - the same place every other piece of
+     * personalisation happens. Detection stays global; only the ranking is
+     * personal, so learning costs nothing per symbol or per signal.
+     */
+    const learned = learnedWeights(await this.feedback.forUser(userId));
+
     const ranked = rankSignals(
       { signals: relevant, items: snap.items, names, readIds, confidence },
       {
         now,
+        learned,
         recencyHalfLifeMs: this.opts.recencyHalfLifeMs,
         maxItems: this.opts.digest.maxItems,
         maxPerSymbol: this.opts.digest.maxPerSymbol,

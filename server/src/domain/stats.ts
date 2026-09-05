@@ -97,6 +97,141 @@ export function atrPct(bars: readonly Bar[], n = 14): number {
 }
 
 /**
+ * Two-factor regression: market, then sector.
+ *
+ * One market factor answers "did everything move?". It cannot answer "did
+ * every *bank* move?", and that is the question a user actually has when their
+ * bank stock drops 4%. Without a sector factor, a sector-wide repricing shows
+ * up as idiosyncratic for every single member - so the briefing fires eight
+ * near-identical alarms about one event, which is precisely the noise this
+ * product exists to remove.
+ *
+ * **The sector factor is orthogonalised against the market first.** Sector
+ * returns are strongly correlated with market returns - XLF and SPY share most
+ * of their variance - and regressing on two collinear factors gives unstable,
+ * wildly-signed coefficients that flip between recomputes. Regressing sector
+ * on market and keeping only the *residual* removes that: what is left is the
+ * part of the sector's move the market does not already explain.
+ *
+ * This has a second benefit worth stating. Because the residual factor is by
+ * construction uncorrelated with the market, the market beta comes out
+ * identical to the single-factor one. Adding sector cannot silently change the
+ * market attribution, so `beta` stays comparable to what it meant before, and
+ * the three parts sum exactly to the total return.
+ */
+export function regress2(
+  assetReturns: readonly number[],
+  marketReturns: readonly number[],
+  sectorReturns: readonly number[],
+): {
+  beta: number;
+  betaSector: number;
+  alpha: number;
+  residSigma: number;
+  r2: number;
+  n: number;
+} {
+  const n = Math.min(assetReturns.length, marketReturns.length, sectorReturns.length);
+
+  // Not enough overlap to identify two factors. Fall back rather than fit
+  // noise: a sector beta from twenty observations is worse than none.
+  if (n < 30) {
+    const one = regress(assetReturns, marketReturns);
+    return { ...one, betaSector: 0 };
+  }
+
+  const y = assetReturns.slice(-n);
+  const m = marketReturns.slice(-n);
+  const s = sectorReturns.slice(-n);
+
+  // Step 1: the part of the sector move the market does not explain.
+  const sOnM = regress(s, m);
+  const mMean = mean(m);
+  const sOrth: number[] = [];
+  for (let i = 0; i < n; i++) {
+    sOrth.push((s[i] as number) - (sOnM.alpha + sOnM.beta * (m[i] as number)));
+  }
+
+  // `stdev` is sample (n-1); squaring it is the matching variance.
+  const sVar = stdev(sOrth) ** 2;
+  // A sector that is indistinguishable from the market carries no extra
+  // information - which is the correct answer for, say, a mega-cap tech name
+  // in a tech-dominated index, not a failure.
+  if (sVar <= EPS) {
+    const one = regress(y, m);
+    return { ...one, betaSector: 0 };
+  }
+
+  // Step 2: both slopes, independently, because the regressors are orthogonal.
+  const beta = regress(y, m).beta;
+  const betaSector = regress(y, sOrth).beta;
+
+  const yMean = mean(y);
+  const sOrthMean = mean(sOrth);
+  const alpha = yMean - beta * mMean - betaSector * sOrthMean;
+
+  const residuals: number[] = [];
+  let ssTot = 0;
+  for (let i = 0; i < n; i++) {
+    const fitted = alpha + beta * (m[i] as number) + betaSector * (sOrth[i] as number);
+    residuals.push((y[i] as number) - fitted);
+    const dt = (y[i] as number) - yMean;
+    ssTot += dt * dt;
+  }
+  const ssRes = residuals.reduce((a, r) => a + r * r, 0);
+
+  return {
+    beta,
+    betaSector,
+    alpha,
+    residSigma: stdev(residuals),
+    r2: ssTot > EPS ? Math.max(0, 1 - ssRes / ssTot) : 0,
+    n,
+  };
+}
+
+/**
+ * Split one day's return into market, sector and idiosyncratic parts.
+ *
+ * The three add up to the total exactly, which is what makes it safe to show a
+ * user: "you are down 4.2%, of which 1.1% was the market, 2.6% was every other
+ * semiconductor, and 0.5% was you" is a complete account, not a selection.
+ *
+ * The sector input is the *raw* sector return; it is orthogonalised here with
+ * the same market beta used for the fit, so attribution matches the model.
+ */
+export function attribute(args: {
+  assetReturn: number;
+  marketReturn: number;
+  sectorReturn: number | null;
+  beta: number;
+  betaSector: number;
+  /** The sector proxy's own market beta, so the sector part excludes the market part. */
+  sectorMarketBeta?: number;
+}): { market: number; sector: number; idiosyncratic: number } {
+  const beta = Number.isFinite(args.beta) ? args.beta : 1;
+  const market = beta * args.marketReturn;
+
+  let sector = 0;
+  if (args.sectorReturn !== null && Number.isFinite(args.betaSector)) {
+    const s0 = Number.isFinite(args.sectorMarketBeta ?? Number.NaN)
+      ? (args.sectorMarketBeta as number)
+      : 1;
+    // The sector's own move, less the part of it the market already accounts
+    // for - otherwise the market's contribution is counted twice.
+    sector = args.betaSector * (args.sectorReturn - s0 * args.marketReturn);
+  }
+
+  return {
+    market,
+    sector,
+    // By subtraction, so the parts always sum to the total even when a factor
+    // is missing. A decomposition that does not add up is worse than none.
+    idiosyncratic: args.assetReturn - market - sector,
+  };
+}
+
+/**
  * OLS slope of asset returns on market returns, plus the residual standard
  * deviation. Beta lets us separate "the whole market moved" from "something
  * happened to this company" - the single most important distinction when
@@ -211,6 +346,12 @@ export function computeStats(
   bars: readonly Bar[],
   marketBars: readonly Bar[],
   now: number,
+  /**
+   * The sector proxy's bars, when the instrument has one. Optional so every
+   * existing caller keeps working and gets exactly the old single-factor
+   * behaviour.
+   */
+  sector?: { symbol: string; bars: readonly Bar[] } | null,
 ): InstrumentStats {
   const closes = bars.map(adjusted);
   const rets = logReturns(closes);
@@ -232,7 +373,54 @@ export function computeStats(
     pairedMarket.push(Math.log(mCur / mPrev));
   }
 
-  const { beta, residSigma } = regress(pairedAsset, pairedMarket);
+  /*
+   * The sector series, aligned on the same sessions.
+   *
+   * Built alongside the market pairs rather than separately, so all three
+   * series describe exactly the same days. Pairing them independently would
+   * quietly regress a 250-day asset series against a 248-day sector one and
+   * mis-attribute every mismatched day.
+   */
+  const sectorByTs =
+    sector && sector.symbol !== symbol ? new Map(sector.bars.map((b) => [b.ts, adjusted(b)])) : null;
+
+  const pairedSector: number[] = [];
+  let sectorAligned = sectorByTs !== null;
+  if (sectorByTs) {
+    for (let i = 1; i < bars.length; i++) {
+      const cur = bars[i] as Bar;
+      const prev = bars[i - 1] as Bar;
+      const mCur = marketByTs.get(cur.ts);
+      const mPrev = marketByTs.get(prev.ts);
+      if (mCur === undefined || mPrev === undefined) continue;
+      if (adjusted(prev) <= EPS || mPrev <= EPS) continue;
+
+      const sCur = sectorByTs.get(cur.ts);
+      const sPrev = sectorByTs.get(prev.ts);
+      // One missing sector day would shift every later observation by one, so
+      // a gap disqualifies the factor rather than silently misaligning it.
+      if (sCur === undefined || sPrev === undefined || sPrev <= EPS) {
+        sectorAligned = false;
+        break;
+      }
+      pairedSector.push(Math.log(sCur / sPrev));
+    }
+  }
+
+  const useSector = sectorAligned && pairedSector.length === pairedAsset.length;
+
+  const fit = useSector
+    ? regress2(pairedAsset, pairedMarket, pairedSector)
+    : { ...regress(pairedAsset, pairedMarket), betaSector: 0 };
+
+  const { beta, residSigma } = fit;
+
+  // Only claim a sector loading when one was actually fitted. `regress2` falls
+  // back to the single-factor result on thin history, and reporting 0 there
+  // would look like a measured absence of exposure rather than an absence of
+  // measurement.
+  const fittedSector = useSector && fit.betaSector !== 0;
+  const sectorOnMarket = fittedSector ? regress(pairedSector, pairedMarket).beta : null;
 
   const win = <T,>(arr: readonly T[], n: number): T[] => arr.slice(-Math.min(n, arr.length));
   const y = win(bars, TRADING_DAYS_PER_YEAR);
@@ -260,6 +448,9 @@ export function computeStats(
     sigmaShort: stdev(win(rets, 10)),
     atrPct: atrPct(bars, 14),
     beta,
+    betaSector: fittedSector ? fit.betaSector : null,
+    sectorSymbol: fittedSector && sector ? sector.symbol : null,
+    sectorMarketBeta: sectorOnMarket,
     // If the regression is degenerate, fall back to total vol so that
     // idiosyncratic signals stay conservative rather than over-firing.
     residSigma: residSigma > EPS ? residSigma : sigma90,

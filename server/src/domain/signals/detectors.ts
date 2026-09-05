@@ -33,7 +33,7 @@ import type {
   SignalKind,
 } from '../types.js';
 import type { MarketClock } from '../marketClock.js';
-import { drawdownFromPeak, horizonSigma, saturate } from '../stats.js';
+import { attribute, drawdownFromPeak, horizonSigma, saturate } from '../stats.js';
 
 // ─────────────────────────────────────────────────────────── contract
 
@@ -62,6 +62,12 @@ export interface DetectorContext {
   clock: MarketClock;
   /** Benchmark quote and stats, for the market-adjusted detectors. */
   benchmark: { quote: Quote; stats: InstrumentStats } | null;
+  /**
+   * The instrument's sector proxy, when it has one. Null is normal - the
+   * benchmark, the proxies themselves and anything with thin history all fall
+   * back to the single-factor model.
+   */
+  sector: { quote: Quote; name: string } | null;
   thresholds: Thresholds;
 }
 
@@ -79,7 +85,7 @@ export interface Observation {
   /** 0..1, comparable across kinds. */
   severity: number;
   headline: string;
-  evidence: Record<string, number | string | boolean>;
+  evidence: Record<string, number | string | boolean | null>;
   enter: number;
   exit: number;
   /**
@@ -153,7 +159,7 @@ function sessionReturn(ctx: DetectorContext): number | null {
 function inactive(
   kind: SignalKind,
   headline: string,
-  evidence: Record<string, number | string | boolean>,
+  evidence: Record<string, number | string | boolean | null>,
 ): Observation {
   return {
     kind,
@@ -230,8 +236,32 @@ export const idioMove: Detector = (ctx) => {
   const marketRet = bench.price / bench.prevClose - 1;
 
   const beta = Number.isFinite(ctx.stats.beta) ? ctx.stats.beta : 1;
-  const explained = beta * marketRet;
-  const residual = ret - explained;
+
+  /*
+   * The sector factor, when there is one.
+   *
+   * This is what separates "every semiconductor fell" from "this
+   * semiconductor fell". Without it a sector-wide repricing is idiosyncratic
+   * for every member, so one event becomes eight near-identical alarms - the
+   * exact noise this product exists to remove.
+   */
+  const sectorQuote = ctx.sector?.quote ?? null;
+  const sectorRet =
+    sectorQuote && sectorQuote.prevClose > 0 && sectorQuote.price > 0
+      ? sectorQuote.price / sectorQuote.prevClose - 1
+      : null;
+
+  const parts = attribute({
+    assetReturn: ret,
+    marketReturn: marketRet,
+    sectorReturn: sectorRet,
+    beta,
+    betaSector: ctx.stats.betaSector ?? 0,
+    sectorMarketBeta: ctx.stats.sectorMarketBeta ?? 1,
+  });
+
+  const explained = parts.market + parts.sector;
+  const residual = parts.idiosyncratic;
 
   const horizon = elapsedSessions(ctx);
   // Residual volatility is the right yardstick here: comparing an
@@ -248,9 +278,25 @@ export const idioMove: Detector = (ctx) => {
   // on a big market day.
   const marketExplains = Math.abs(explained) > 1e-9 && Math.abs(residual) < Math.abs(explained) * 0.5;
 
+  /*
+   * Which factor did the explaining?
+   *
+   * Worth distinguishing in the headline, because the two mean different
+   * things to someone holding the stock. "The market is down" is context they
+   * probably already have; "your whole sector is down and this name is merely
+   * along for the ride" is usually news, and it is the difference between
+   * closing the tab and looking at their other holdings.
+   */
+  const sectorLed = Math.abs(parts.sector) > Math.abs(parts.market);
+  const sectorName = ctx.sector?.name ?? null;
+
+  const explainedBy = sectorLed && sectorName ? sectorName.toLowerCase() : 'the market';
+
   const headline = marketExplains
-    ? `${ctx.symbol} moved with the market (${signed(ret)} vs ${signed(explained)} explained)`
-    : `${ctx.symbol} ${word(z)} ${pct(Math.abs(residual))} beyond the market — ${sig(z)} idiosyncratic`;
+    ? `${ctx.symbol} moved with ${explainedBy} (${signed(ret)} vs ${signed(explained)} explained)`
+    : `${ctx.symbol} ${word(z)} ${pct(Math.abs(residual))} beyond ${
+        sectorRet !== null ? 'market and sector' : 'the market'
+      } — ${sig(z)} idiosyncratic`;
 
   return {
     kind: 'idio_move',
@@ -268,6 +314,20 @@ export const idioMove: Detector = (ctx) => {
       residSigma: ctx.stats.residSigma,
       marketExplains,
       benchmark: bench.symbol,
+      /*
+       * The full decomposition, because these three add up to the total move
+       * exactly. "You are down 4.2%: 1.1% market, 2.6% sector, 0.5% you" is a
+       * complete account rather than a selected fact, and it is the thing a
+       * user can actually act on.
+       */
+      marketPct: parts.market,
+      sectorPct: parts.sector,
+      idiosyncraticPct: parts.idiosyncratic,
+      sector: sectorName,
+      sectorSymbol: ctx.sector?.quote.symbol ?? null,
+      sectorChangePct: sectorRet,
+      betaSector: ctx.stats.betaSector,
+      sectorLed: sectorLed && sectorRet !== null,
     },
     enter: idioEnter,
     exit: idioExit,

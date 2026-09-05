@@ -1372,7 +1372,7 @@ body {
   letter-spacing: 0.02em;
   color: var(--text-3);
   padding: 2px 7px 2px 6px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: 999px;
   white-space: nowrap;
 }
@@ -1428,4 +1428,107 @@ body {
   .live-dot {
     padding: 4px;
   }
+}
+
+/* ── the notification switch ────────────────────────────────────────── */
+.bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.bell:hover {
+  color: var(--text);
+  border-color: var(--text-3);
+}
+
+.bell.is-on {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 35%, transparent);
+}
+
+/* Blocked at the browser level: still visible, so the user can find out why. */
+.bell.is-blocked {
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
+/* ── move attribution ───────────────────────────────────────────────────
+ *
+ * The three parts sum to the total exactly, so the bar is a complete account
+ * of the move rather than a selection. Widths are by magnitude, so a sector
+ * that moved *against* the stock still takes up space - which is the case
+ * where the decomposition is most worth reading.
+ */
+.attribution {
+  margin-top: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.attribution-bar {
+  display: flex;
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.attribution-seg {
+  min-width: 2px;
+  transition: width 200ms ease;
+}
+
+.attribution-seg.is-market {
+  background: color-mix(in srgb, var(--text-3) 55%, transparent);
+}
+.attribution-seg.is-sector {
+  background: color-mix(in srgb, var(--info) 60%, transparent);
+}
+/* The remainder — the part that is actually about this company — is the
+ * point of the whole exercise, so it is the only one at full strength. */
+.attribution-seg.is-idio {
+  background: var(--text);
+}
+
+.attribution-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.attribution-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.attribution-key i {
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.attribution-key.is-market i {
+  background: color-mix(in srgb, var(--text-3) 55%, transparent);
+}
+.attribution-key.is-sector i {
+  background: color-mix(in srgb, var(--info) 60%, transparent);
+}
+.attribution-key.is-idio i {
+  background: var(--text);
 }

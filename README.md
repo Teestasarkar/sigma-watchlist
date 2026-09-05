@@ -198,6 +198,61 @@ users watching AAPL share one detection cycle and one signal row. The cost of
 the system scales with the number of *instruments people care about*, not with
 the number of people. This is the single decision the whole design rests on.
 
+### Separating the market, the sector, and the company
+
+The question a user actually has when a holding drops 4% is not "did it drop"
+- they can see that. It is *whose fault is it*. So every move is decomposed
+against two factors, and the three parts sum to the total exactly:
+
+```
+XOM  −1.53%  =  market −0.01%  +  energy +0.63%  +  this company −2.14%
+NVDA +8.74%  =  market +1.24%  +  semis  +0.62%  +  this company +6.88%
+```
+
+Those are real numbers from a live run. XOM is the interesting one: energy rose
+while XOM fell, so the company-specific part is *larger* than the headline
+move - exactly the case a raw percentage hides.
+
+The second factor matters most for what it *stops*. With one market factor, a
+sector-wide repricing is idiosyncratic for every member: eight semiconductors
+fall on one piece of news and the briefing fires eight near-identical alarms.
+Betas are fitted by OLS on a year of daily returns, with the sector factor
+orthogonalised against the market first - otherwise the two are collinear, the
+coefficients flip sign between recomputes, and the market beta silently stops
+meaning what it did.
+
+Real fitted loadings from that run, which are recognisable rather than
+arbitrary:
+
+| Symbol | Market β | Sector β | Proxy |
+| --- | --- | --- | --- |
+| JPM | 0.78 | **1.12** | XLF |
+| XOM | −0.55 | **1.05** | XLE |
+| KO | −0.26 | **0.90** | XLP |
+| NVDA | 1.92 | 0.44 | SMH |
+
+### Learning what you do not care about
+
+Dismissals were recorded and never read, which meant a user could say the same
+thing a hundred times and be ignored. They now adjust a per-kind weight in the
+ranking - and every property of that is a guard against the way personalisation
+usually goes wrong:
+
+- **It demotes, it never hides.** A learned weight multiplies an existing
+  score and is floored at 0.5. Only an explicit mute removes something. A feed
+  that silently stops showing you things is one you cannot trust to have shown
+  you the important one.
+- **It needs evidence.** Three dismissals move the weight by 4%. Fifty move it
+  by 31%. The first few times someone clears a notification they are usually
+  just clearing a notification.
+- **It is asymmetric.** Down to 0.5, up to 1.15. Promoting a kind because
+  someone opened it twice is how a feed eats itself.
+- **Integrity signals are exempt.** "This price cannot be trusted" is not a
+  preference, and dismissing one is not a request to be kept in the dark next
+  time.
+- **It says so, and it can be reset.** The rank line reads *"you usually
+  dismiss these (×0.71)"*, and `POST /api/preferences/learned/reset` clears it.
+
 ### How it scales
 
 | Dimension | Mechanism |
@@ -205,6 +260,7 @@ the number of people. This is the single decision the whole design rests on.
 | Many users, same symbols | Signals are global. `watchlist_items(symbol)` is a **reverse index**: the poller works from the union of all watchlists, so a symbol held by 10,000 users costs one request per cycle. |
 | Large watchlists | The read path is a fixed number of batched queries — no query inside a loop. 500 symbols costs the same round trips as 5. Statistics are materialised on session close, not recomputed per request. |
 | Many symbols | `ingest_jobs` is a queue table, not a timer per symbol. `FOR UPDATE SKIP LOCKED` hands concurrent workers **disjoint** batches, so the ingest tier scales horizontally with no coordination service. |
+| Read replicas | Set `DATABASE_READ_URL` and market-data reads route to a replica while every write stays on the primary. The split follows *who writes the row*: quotes, bars and signals are written by ingest and can lag a second; watchlists and checkpoints are written by the user's own request and never leave the primary — so no request ever reads back its own write from a replica. |
 | Attention | Three poll tiers. A symbol someone is *looking at* polls every 5s; one merely sitting in a list, every 20s; one nobody has opened, every 2 min. Attention earns freshness — that is what makes a 500-symbol list affordable. |
 | Bounded cost | Batch size caps per-tick work; concurrency is bounded inside a batch; market-closed multiplies every interval by 8. |
 | Many connected browsers | The live stream broadcasts per **symbol**, not per user, and carries no payload — one event serves every subscriber, and each client re-reads its own personalised view. Broadcast cost scales with instruments, not users. Bursts are coalesced into one event per 250ms. |
@@ -472,21 +528,31 @@ test suite runs in 15 seconds with no mocking framework.
 
 ---
 
-## What I would do next
+## Honest limits
 
-Honest gaps, in the order I would close them:
+What this does not do, and why.
 
-1. **Notifications.** The engine already knows what is worth interrupting
-   someone for, and the episode machine already guarantees it fires once. Email
-   or push is the natural next surface, and the hard part is done.
-2. **Sector factors in the regression.** Currently one market factor. A second
-   sector factor would separate "all banks moved" from "this bank moved" — the
-   simulator already generates them, so the engine is the missing half.
-3. **Per-user threshold learning.** Dismissals are recorded but not yet used.
-   A user who repeatedly dismisses `volume_spike` is telling us its weight is
-   wrong *for them*.
-4. **Corporate actions.** A 2-for-1 split is currently a −50% move. Real
-   deployment needs an adjustment feed; the bar table would need an
-   adjustment factor.
-5. **Read replicas.** The read path is already batched and index-only, so it
-   would move to a replica without code changes. Not needed at this scale.
+- **Notifications only reach an open tab.** Desktop notifications fire from the
+  live stream, which means the browser has to be running. True background push
+  needs a service worker and VAPID keys; the decision logic - severity floor,
+  once per episode, silent while you are looking, a ceiling per hour - is
+  already here and would carry over unchanged.
+- **The sector factor is a traded proxy, not a real risk model.** Nine sector
+  ETFs, one factor each. A production risk model would use size, value,
+  momentum and quality alongside them. Two factors capture most of what a user
+  actually asks ("is this the market, my sector, or my company?") and stay
+  explainable, which a nine-factor model would not.
+- **Learned weights are per-kind, not per-symbol.** Dismissing every
+  `volume_spike` teaches the ranking about volume spikes in general, not about
+  volume spikes *in GME*. Per-symbol would need far more data per user before
+  it said anything.
+- **Every instrument is USD.** The `currency` column exists; FX-adjusted
+  returns do not. Doing it properly needs an FX feed and a decision about
+  which currency significance is measured in.
+- **History comes from one vendor.** Quotes are reconciled across two; bars are
+  Yahoo's alone, because merging two vendors' split-adjustment conventions
+  would corrupt every volatility estimate. Two coherent quote sources and one
+  coherent history is the right trade at this size.
+- **The demo runs on a free instance that sleeps.** First load after an idle
+  period takes ~30s to wake, and it wakes with a gap in its history. Backfill
+  handles the gap correctly - that path is tested - but the wait is real.

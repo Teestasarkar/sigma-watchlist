@@ -101,7 +101,25 @@ export interface InstrumentStats {
   atrPct: number;
   /** Sensitivity to the market factor, from OLS on daily returns. */
   beta: number;
-  /** Stdev of the market-adjusted (residual) daily return. */
+  /**
+   * Sensitivity to the sector factor, *after* the market has been removed
+   * from it. Null when the instrument has no sector proxy, or too little
+   * overlapping history to identify two factors - which is an absence, not a
+   * zero loading.
+   */
+  betaSector: number | null;
+  /** Which series `betaSector` was measured against. */
+  sectorSymbol: string | null;
+  /**
+   * The sector proxy's own market beta. Kept so read-time attribution can
+   * reproduce the orthogonalisation without refitting the regression.
+   */
+  sectorMarketBeta: number | null;
+  /**
+   * Stdev of the residual daily return, after every factor in the fit. With a
+   * sector factor present this is smaller than the market-only residual, which
+   * is the point: a sector-wide move stops counting as idiosyncratic.
+   */
   residSigma: number;
   /** Short-window vol, for regime detection. */
   sigmaShort: number;
@@ -156,7 +174,14 @@ export interface Signal {
   asOf: Millis;
   headline: string;
   /** The numbers behind the claim, so the UI can show its work. */
-  evidence: Record<string, number | string | boolean>;
+  /**
+   * Supporting numbers, rendered under the headline.
+   *
+   * `null` is allowed and meaningful: a sector factor that could not be
+   * fitted is an absence, not a zero loading, and the UI shows the two
+   * differently.
+   */
+  evidence: Record<string, number | string | boolean | null>;
   /** Set when a later signal of the same kind replaces this one. */
   supersededAt: Millis | null;
 }

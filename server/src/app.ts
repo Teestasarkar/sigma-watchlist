@@ -9,7 +9,8 @@
  */
 
 import { config as defaultConfig, type Config } from './config.js';
-import { createSqlClient, type SqlClient } from './db/sql.js';
+import { createPostgresClient, createSqlClient, type SqlClient } from './db/sql.js';
+import { maybeWithReplica } from './db/replica.js';
 import { migrate } from './db/migrate.js';
 import { MarketRepo } from './db/marketRepo.js';
 import { UserRepo } from './db/userRepo.js';
@@ -30,12 +31,18 @@ import { CnbcProvider } from './providers/cnbc.js';
 import { FinnhubProvider } from './providers/finnhub.js';
 import { ProviderRegistry } from './providers/registry.js';
 import type { MarketDataProvider } from './providers/types.js';
-import { ALL_ENTRIES, BENCHMARK, STARTER_SYMBOLS } from './providers/universe.js';
+import {
+  ALL_ENTRIES,
+  BENCHMARK,
+  SECTOR_PROXY_SYMBOLS,
+  STARTER_SYMBOLS,
+} from './providers/universe.js';
 import { hashPassword } from './infra/password.js';
 import { DetectionEngine, thresholdsFromConfig } from './services/detection.js';
 import { IngestService } from './services/ingest.js';
 import { CorporateActionService } from './services/corporateActions.js';
 import { ActionsRepo } from './db/actionsRepo.js';
+import { FeedbackRepo } from './db/feedbackRepo.js';
 import { ViewService } from './services/view.js';
 import { ReplayService } from './services/replay.js';
 import { Scheduler } from './ingest/scheduler.js';
@@ -56,6 +63,8 @@ export interface App {
   signals: SignalRepo;
   jobs: IngestRepo;
   actions: ActionsRepo;
+  /** Per-user, per-kind tallies that personalise the ranking. */
+  feedback: FeedbackRepo;
 
   registry: ProviderRegistry;
   detection: DetectionEngine;
@@ -87,6 +96,17 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     dataDir: options.inMemory ? undefined : config.dataDir,
   });
   await migrate(sql);
+
+  /*
+   * Reads can go to a replica; migrations and writes never do.
+   *
+   * Deliberately after `migrate`, so schema changes are always applied to the
+   * primary through an unwrapped client - and so a replica still catching up
+   * on a migration cannot be handed a read against a table it does not have
+   * yet. With DATABASE_READ_URL unset this returns `sql` itself, so the
+   * default deployment has exactly one pool and no routing branch.
+   */
+  const db = await maybeWithReplica(sql, config.databaseReadUrl, createPostgresClient);
 
   const faults = createFaultState();
 
@@ -140,6 +160,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
   const signals = new SignalRepo(sql);
   const jobs = new IngestRepo(sql);
   const actionsRepo = new ActionsRepo(sql);
+  const feedbackRepo = new FeedbackRepo(sql);
 
   const detection = new DetectionEngine(signals, marketClock, thresholdsFromConfig(config));
 
@@ -181,12 +202,34 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     minHistory: config.replay.minHistory,
   });
 
-  const view = new ViewService(users, market, signals, jobs, registry, marketClock, {
+  /*
+   * The read path's market-data repositories.
+   *
+   * Separate instances over `db` rather than `sql`, so that with
+   * DATABASE_READ_URL set the heavy read queries - a year of bars and a
+   * signal history across every watched symbol - land on the replica while
+   * every write, and everything the user reads back immediately after their
+   * own request, stays on the primary. With no replica configured `db` *is*
+   * `sql` and these are two handles to the same pool.
+   */
+  const readMarket = new MarketRepo(db, marketClock);
+  const readSignals = new SignalRepo(db);
+
+  const view = new ViewService(
+    users,
+    readMarket,
+    readSignals,
+    jobs,
+    registry,
+    feedbackRepo,
+    marketClock,
+    {
     freshness: config.freshness,
     digest: config.digest,
     recencyHalfLifeMs: config.signals.recencyHalfLifeMs,
-    minBarsForStats: config.signals.minBarsForStats,
-  });
+      minBarsForStats: config.signals.minBarsForStats,
+    },
+  );
 
   const scheduler = new Scheduler(jobs, signals, auth, ingest, marketClock, clock, {
     tickMs: config.ingest.tickMs,
@@ -212,6 +255,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     signals,
     jobs,
     actions: actionsRepo,
+    feedback: feedbackRepo,
     registry,
     detection,
     ingest,
@@ -242,6 +286,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
           currency: 'USD',
           sector: entry.sector,
           isBenchmark: entry.symbol === BENCHMARK.symbol,
+          isSectorProxy: SECTOR_PROXY_SYMBOLS.includes(entry.symbol),
           now,
         });
       }
@@ -264,6 +309,33 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
           err: err instanceof Error ? err.message : String(err),
         });
       }
+
+      /*
+       * Sector proxies, for the same reason as the benchmark.
+       *
+       * Without their history there is no sector factor, and every
+       * sector-wide repricing reads as idiosyncratic for every member - eight
+       * near-identical alarms about one event. Seeded in parallel because they
+       * are independent and this is startup latency the user waits through.
+       *
+       * A proxy that cannot be fetched is skipped, not fatal: its sector
+       * simply falls back to the single-factor model, which is exactly the
+       * previous behaviour.
+       */
+      await Promise.all(
+        SECTOR_PROXY_SYMBOLS.map(async (symbol) => {
+          try {
+            await ingest.ensureInstrument(symbol, now, {
+              pollIntervalMs: config.ingest.coldIntervalMs,
+            });
+          } catch (err) {
+            log.warn('could not seed a sector proxy; that sector falls back to one factor', {
+              symbol,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }),
+      );
 
       await ensureDemoUser(app, now);
 
