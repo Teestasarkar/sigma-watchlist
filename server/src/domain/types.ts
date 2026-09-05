@@ -11,7 +11,20 @@ export interface Bar {
   open: number;
   high: number;
   low: number;
+  /** The price it actually traded at. What a human should be shown. */
   close: number;
+  /**
+   * Close adjusted for splits and dividends. What statistics must use.
+   *
+   * Without it a 4-for-1 split is a -75% return, which poisons the volatility
+   * estimate for a year and makes every subsequent sigma meaningless. The
+   * provider's convention is that the *newest* bar's adjusted close equals its
+   * raw close and history is scaled, so an adjusted series stays directly
+   * comparable to the live price - no conversion needed at the boundary.
+   *
+   * Null when the provider does not supply one; callers fall back to `close`.
+   */
+  adjClose: number | null;
   volume: number;
   source: string;
 }
@@ -115,7 +128,8 @@ export type SignalKind =
   | 'vol_regime'
   | 'drawdown'
   | 'stale_data'
-  | 'data_conflict';
+  | 'data_conflict'
+  | 'corporate_action';
 
 export type Direction = 'up' | 'down' | 'neutral';
 
@@ -156,6 +170,27 @@ export interface ScoredSignal extends Signal {
 }
 
 // ─────────────────────────────────────────────────────────── user state
+
+/**
+ * A split or a dividend.
+ *
+ * Recorded because it is the one kind of price change that is not news, and
+ * that a naive watchlist reports as catastrophe: a 10-for-1 split looks like
+ * -90%. Recording it lets us adjust the user's checkpoint instead of alarming
+ * them, and tell them we did.
+ */
+export interface CorporateAction {
+  symbol: string;
+  /** Effective session, as a canonical timestamp. */
+  ts: Millis;
+  kind: 'split' | 'dividend';
+  /** For a split: shares after. A 10-for-1 has numerator 10. */
+  numerator: number;
+  denominator: number;
+  /** For a dividend: amount per share. */
+  amount: number | null;
+  detectedAt: Millis;
+}
 
 export interface User {
   id: string;

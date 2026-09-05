@@ -26,6 +26,7 @@ import {
 import type { MarketRepo } from '../db/marketRepo.js';
 import type { IngestRepo } from '../db/ingestRepo.js';
 import type { DetectionEngine } from './detection.js';
+import type { CorporateActionService } from './corporateActions.js';
 import { createLogger } from '../infra/logger.js';
 
 const log = createLogger('ingest');
@@ -54,6 +55,8 @@ export interface RefreshResult {
    */
   throttled?: boolean;
   retryAfterMs?: number;
+  /** Splits applied to stored checkpoints on this pass. */
+  corporateActions?: number;
 }
 
 /**
@@ -74,6 +77,7 @@ export class IngestService {
     private readonly market: MarketRepo,
     private readonly jobs: IngestRepo,
     private readonly detection: DetectionEngine,
+    private readonly actions: CorporateActionService,
     private readonly clock: MarketClock,
     private readonly opts: IngestOptions,
   ) {}
@@ -125,6 +129,9 @@ export class IngestService {
     // Enqueue before computing statistics: if stats fail we still want the
     // symbol polled, and the next cycle will retry them.
     await this.jobs.ensureJob(sym, opts.pollIntervalMs, now);
+
+    // Learn about any splits before the first statistics are computed.
+    if (written > 0) await this.actions.sync(sym, now);
 
     if (written > 0 || !(await this.market.getStats(sym))) {
       await this.recomputeStats(sym, now);
@@ -218,6 +225,16 @@ export class IngestService {
     result.barsWritten = await this.backfillIfNeeded(symbol, now);
 
     if (result.barsWritten > 0) {
+      /*
+       * Check for splits *before* recomputing statistics.
+       *
+       * New bars are the only moment a corporate action can appear, and a
+       * split rescales every historical bar - so the adjusted closes the
+       * statistics are about to read have just changed underneath them.
+       */
+      const applied = await this.actions.sync(symbol, now);
+      result.corporateActions = applied.splitsApplied;
+
       await this.recomputeStats(symbol, now);
       result.statsRecomputed = true;
     }

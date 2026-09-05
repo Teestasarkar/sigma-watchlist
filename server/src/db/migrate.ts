@@ -70,6 +70,6 @@ export async function dropAll(sql: SqlClient): Promise<void> {
     DROP TABLE IF EXISTS idempotency_keys, symbol_activity, ingest_jobs,
       signal_reads, user_symbol_marks, signal_state, signals,
       watchlist_items, watchlists, instrument_stats, quotes_latest, bars,
-      instruments, sessions, users, schema_meta CASCADE;
+      corporate_actions, instruments, sessions, users, schema_meta CASCADE;
   `);
 }

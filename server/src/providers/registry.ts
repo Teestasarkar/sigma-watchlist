@@ -32,7 +32,13 @@ import {
 import type { Clock } from '../infra/clock.js';
 import type { MarketClock } from '../domain/marketClock.js';
 import { systemClock } from '../infra/clock.js';
-import type { Bar, ProviderHealth, Quote, RawQuote } from '../domain/types.js';
+import type {
+  Bar,
+  CorporateAction,
+  ProviderHealth,
+  Quote,
+  RawQuote,
+} from '../domain/types.js';
 import {
   SymbolNotFoundError,
   TransientProviderError,
@@ -263,6 +269,24 @@ export class ProviderRegistry {
       if (reasons.length === 0) return [];
       throw new AllProvidersFailedError(symbol, reasons);
     });
+  }
+
+  /**
+   * Splits and dividends from the first provider that reports them.
+   *
+   * Not reconciled across providers: two vendors disagreeing about whether
+   * a split happened is not something to average. Take the first coherent
+   * answer, or none.
+   */
+  async getCorporateActions(symbol: string, sessions: number): Promise<CorporateAction[]> {
+    for (const entry of this.entries) {
+      if (!entry.provider.getCorporateActions) continue;
+      const outcome = await this.call(entry, `actions:${symbol}`, (signal) =>
+        entry.provider.getCorporateActions!(symbol, sessions, signal),
+      );
+      if (outcome.ok) return outcome.value;
+    }
+    return [];
   }
 
   async resolve(symbol: string): Promise<{

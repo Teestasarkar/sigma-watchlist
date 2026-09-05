@@ -61,6 +61,7 @@ const mapBar = (r: Row): Bar => ({
   high: n(r.high),
   low: n(r.low),
   close: n(r.close),
+  adjClose: nOrNull(r.adj_close),
   volume: n(r.volume),
   source: r.source as string,
 });
@@ -84,7 +85,7 @@ const mapStats = (r: Row): InstrumentStats => ({
   peak52w: n(r.peak_52w),
 });
 
-const BAR_COLUMNS = 'symbol, ts, open, high, low, close, volume, source';
+const BAR_COLUMNS = 'symbol, ts, open, high, low, close, adj_close, volume, source';
 
 export class MarketRepo {
   /**
@@ -204,7 +205,7 @@ export class MarketRepo {
   async upsertBars(bars: readonly Bar[]): Promise<void> {
     if (bars.length === 0) return;
 
-    const COLS = 9;
+    const COLS = 10;
     const perStatement = 500;
 
     await this.sql.tx(async () => {
@@ -225,21 +226,26 @@ export class MarketRepo {
             bar.high,
             bar.low,
             bar.close,
+            bar.adjClose,
             bar.volume,
             bar.source,
           );
         });
 
         await this.sql.query(
-          `INSERT INTO bars (symbol, ts, session_key, open, high, low, close, volume, source)
+          `INSERT INTO bars
+             (symbol, ts, session_key, open, high, low, close, adj_close, volume, source)
            VALUES ${tuples.join(', ')}
            ON CONFLICT (symbol, ts) DO UPDATE SET
-             open   = excluded.open,
-             high   = GREATEST(bars.high, excluded.high),
-             low    = LEAST(bars.low, excluded.low),
-             close  = excluded.close,
-             volume = GREATEST(bars.volume, excluded.volume),
-             source = excluded.source`,
+             open      = excluded.open,
+             high      = GREATEST(bars.high, excluded.high),
+             low       = LEAST(bars.low, excluded.low),
+             close     = excluded.close,
+             -- Always take the newest adjustment: a split rescales every
+             -- historical bar, so a re-fetch is a correction, not a duplicate.
+             adj_close = COALESCE(excluded.adj_close, bars.adj_close),
+             volume    = GREATEST(bars.volume, excluded.volume),
+             source    = excluded.source`,
           params,
         );
       }

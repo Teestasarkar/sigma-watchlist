@@ -24,7 +24,7 @@
  *     disjoint batches without coordination.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -302,7 +302,40 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
  * version, so a failure leaves the database on the previous version rather
  * than half-migrated.
  */
+/**
+ * v3 - corporate actions.
+ *
+ * `adj_close` is the split- and dividend-adjusted close. Statistics must use
+ * it: without it a 4-for-1 split is a -75% daily return, which corrupts the
+ * volatility estimate for a full year and makes every sigma downstream
+ * meaningless. Raw `close` is kept because it is what the instrument actually
+ * traded at, and that is what a person should be shown.
+ */
+export const SCHEMA_V3 = `
+ALTER TABLE bars ADD COLUMN IF NOT EXISTS adj_close DOUBLE PRECISION;
+
+-- Splits and dividends, recorded so they can be applied exactly once. A split
+-- rescales every stored checkpoint price for that symbol; applying it twice
+-- would be as wrong as not applying it at all.
+CREATE TABLE IF NOT EXISTS corporate_actions (
+  symbol      TEXT   NOT NULL REFERENCES instruments(symbol) ON DELETE CASCADE,
+  ts          BIGINT NOT NULL,
+  kind        TEXT   NOT NULL,
+  numerator   DOUBLE PRECISION NOT NULL DEFAULT 1,
+  denominator DOUBLE PRECISION NOT NULL DEFAULT 1,
+  amount      DOUBLE PRECISION,
+  detected_at BIGINT NOT NULL,
+  -- Whether the watermark rescale has been applied. Idempotency for an
+  -- operation that is destructive if repeated.
+  applied     BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (symbol, ts, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_actions_pending
+  ON corporate_actions(symbol) WHERE NOT applied;
+`;
+
 export const MIGRATIONS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
   { version: 1, name: 'initial', sql: SCHEMA_V1 },
   { version: 2, name: 'credentials', sql: SCHEMA_V2 },
+  { version: 3, name: 'corporate-actions', sql: SCHEMA_V3 },
 ];

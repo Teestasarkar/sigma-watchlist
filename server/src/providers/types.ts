@@ -8,7 +8,7 @@
  * different bugs) per vendor.
  */
 
-import type { Bar, RawQuote } from '../domain/types.js';
+import type { Bar, CorporateAction, RawQuote } from '../domain/types.js';
 
 export interface ProviderCapabilities {
   /** Can this provider return historical daily bars, or only live quotes? */
@@ -51,6 +51,17 @@ export interface MarketDataProvider {
 
   /** Daily bars, oldest first. May return fewer than requested. */
   getHistory(symbol: string, days: number, signal?: AbortSignal): Promise<Bar[]>;
+
+  /**
+   * Splits and dividends over the requested window, if the provider
+   * reports them. Optional: a provider that cannot say is not broken, it
+   * just means adjusted closes are the only correction available.
+   */
+  getCorporateActions?(
+    symbol: string,
+    sessions: number,
+    signal?: AbortSignal,
+  ): Promise<CorporateAction[]>;
 
   /** Instrument metadata, if the provider offers it. */
   resolve?(symbol: string, signal?: AbortSignal): Promise<{

@@ -27,7 +27,7 @@
  *     endpoint with unknown limits, for no benefit.
  */
 
-import type { Bar, RawQuote } from '../domain/types.js';
+import type { Bar, CorporateAction, RawQuote } from '../domain/types.js';
 import type { MarketClock } from '../domain/marketClock.js';
 import type { Clock } from '../infra/clock.js';
 import { systemClock } from '../infra/clock.js';
@@ -87,6 +87,13 @@ interface ChartResult {
     }>;
     adjclose?: Array<{ adjclose?: Array<number | null> }>;
   };
+  events?: {
+    splits?: Record<
+      string,
+      { date?: number; numerator?: number; denominator?: number; splitRatio?: string }
+    >;
+    dividends?: Record<string, { date?: number; amount?: number }>;
+  };
 }
 
 interface ChartResponse {
@@ -96,10 +103,11 @@ interface ChartResponse {
   };
 }
 
-/** A parsed payload, usable as both a quote and a bar series. */
+/** A parsed payload, usable as a quote, a bar series and an action list. */
 interface Parsed {
   meta: ChartMeta;
   bars: Bar[];
+  actions: CorporateAction[];
   fetchedAt: number;
 }
 
@@ -167,6 +175,10 @@ export class YahooProvider implements MarketDataProvider {
     url.searchParams.set('range', range);
     url.searchParams.set('interval', '1d');
     url.searchParams.set('includePrePost', 'false');
+    // Splits and dividends. Without these the only correction available is
+    // the adjusted close, which fixes statistics but cannot tell us that a
+    // stored checkpoint price needs rescaling.
+    url.searchParams.set('events', 'div,split');
 
     const res = await fetch(url, { headers: HEADERS, signal: signal ?? null });
 
@@ -203,6 +215,7 @@ export class YahooProvider implements MarketDataProvider {
     const parsed = {
       meta: result.meta ?? {},
       bars: this.toBars(symbol, result),
+      actions: this.toActions(symbol, result),
       fetchedAt: this.wall.now(),
       range,
     };
@@ -226,6 +239,7 @@ export class YahooProvider implements MarketDataProvider {
   private toBars(symbol: string, result: ChartResult): Bar[] {
     const ts = result.timestamp ?? [];
     const q = result.indicators?.quote?.[0];
+    const adj = result.indicators?.adjclose?.[0]?.adjclose;
     if (!q || ts.length === 0) return [];
 
     const bars: Bar[] = [];
@@ -253,6 +267,8 @@ export class YahooProvider implements MarketDataProvider {
       const h = typeof high === 'number' && high > 0 ? high : Math.max(o, close);
       const l = typeof low === 'number' && low > 0 ? low : Math.min(o, close);
 
+      const adjusted = adj?.[i];
+
       bars.push({
         symbol,
         ts: this.marketClock.sessionCloseOf(t * 1000),
@@ -260,12 +276,63 @@ export class YahooProvider implements MarketDataProvider {
         high: Math.max(h, o, close),
         low: Math.min(l, o, close),
         close,
+        // Split- and dividend-adjusted. Yahoo scales history so the newest
+        // bar's adjusted close equals its raw close, which is what keeps an
+        // adjusted series directly comparable with the live price.
+        adjClose:
+          typeof adjusted === 'number' && Number.isFinite(adjusted) && adjusted > 0
+            ? adjusted
+            : null,
         volume: typeof volume === 'number' && volume >= 0 ? volume : 0,
         source: this.name,
       });
     }
 
     return bars;
+  }
+
+  /** Splits and dividends from the payload's events block. */
+  private toActions(symbol: string, result: ChartResult): CorporateAction[] {
+    const out: CorporateAction[] = [];
+    const now = this.wall.now();
+
+    for (const raw of Object.values(result.events?.splits ?? {})) {
+      const numerator = raw.numerator;
+      const denominator = raw.denominator;
+      if (
+        typeof raw.date !== 'number' ||
+        typeof numerator !== 'number' ||
+        typeof denominator !== 'number' ||
+        !(numerator > 0) ||
+        !(denominator > 0)
+      ) {
+        continue;
+      }
+      out.push({
+        symbol,
+        ts: this.marketClock.sessionCloseOf(raw.date * 1000),
+        kind: 'split',
+        numerator,
+        denominator,
+        amount: null,
+        detectedAt: now,
+      });
+    }
+
+    for (const raw of Object.values(result.events?.dividends ?? {})) {
+      if (typeof raw.date !== 'number' || typeof raw.amount !== 'number') continue;
+      out.push({
+        symbol,
+        ts: this.marketClock.sessionCloseOf(raw.date * 1000),
+        kind: 'dividend',
+        numerator: 1,
+        denominator: 1,
+        amount: raw.amount,
+        detectedAt: now,
+      });
+    }
+
+    return out.sort((a, b) => a.ts - b.ts);
   }
 
   // ─────────────────────────────────────────────────────── interface
@@ -402,6 +469,16 @@ export class YahooProvider implements MarketDataProvider {
     const completed = bars.filter((b) => b.ts <= lastCompleted);
 
     return completed.slice(-sessions);
+  }
+
+  async getCorporateActions(
+    symbol: string,
+    sessions: number,
+    signal?: AbortSignal,
+  ): Promise<CorporateAction[]> {
+    const range = sessions <= 130 ? '6mo' : sessions <= 260 ? '1y' : '2y';
+    const { actions } = await this.fetchChart(symbol.toUpperCase(), range, signal);
+    return actions;
   }
 
   async resolve(

@@ -33,6 +33,8 @@ import { ALL_ENTRIES, BENCHMARK, STARTER_SYMBOLS } from './providers/universe.js
 import { hashPassword } from './infra/password.js';
 import { DetectionEngine, thresholdsFromConfig } from './services/detection.js';
 import { IngestService } from './services/ingest.js';
+import { CorporateActionService } from './services/corporateActions.js';
+import { ActionsRepo } from './db/actionsRepo.js';
 import { ViewService } from './services/view.js';
 import { ReplayService } from './services/replay.js';
 import { Scheduler } from './ingest/scheduler.js';
@@ -51,6 +53,7 @@ export interface App {
   auth: AuthRepo;
   signals: SignalRepo;
   jobs: IngestRepo;
+  actions: ActionsRepo;
 
   registry: ProviderRegistry;
   detection: DetectionEngine;
@@ -132,14 +135,31 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
   const auth = new AuthRepo(sql);
   const signals = new SignalRepo(sql);
   const jobs = new IngestRepo(sql);
+  const actionsRepo = new ActionsRepo(sql);
 
   const detection = new DetectionEngine(signals, marketClock, thresholdsFromConfig(config));
 
-  const ingest = new IngestService(registry, market, jobs, detection, marketClock, {
+  const corporateActions = new CorporateActionService(
+    registry,
+    market,
+    actionsRepo,
+    signals,
+    config.providers.historySessions,
+  );
+
+  const ingest = new IngestService(
+    registry,
+    market,
+    jobs,
+    detection,
+    corporateActions,
+    marketClock,
+    {
     historySessions: config.providers.historySessions,
     freshness: config.freshness,
-    maxBackfillSessions: 90,
-  });
+      maxBackfillSessions: 90,
+    },
+  );
 
   const replay = new ReplayService(market, detection, marketClock, {
     sessions: config.replay.sessions,
@@ -176,6 +196,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
     auth,
     signals,
     jobs,
+    actions: actionsRepo,
     registry,
     detection,
     ingest,

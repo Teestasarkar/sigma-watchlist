@@ -170,6 +170,8 @@ export class FinnhubProvider implements MarketDataProvider {
         high: (data.h?.[i] as number) ?? close,
         low: (data.l?.[i] as number) ?? close,
         close,
+        // Finnhub's candle endpoint returns unadjusted prices only.
+        adjClose: null,
         volume: (data.v?.[i] as number) ?? 0,
         source: this.name,
       });

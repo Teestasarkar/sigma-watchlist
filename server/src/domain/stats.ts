@@ -11,6 +11,19 @@ export const TRADING_DAYS_PER_YEAR = 252;
 /** Guard against divide-by-zero producing Infinity sigmas on flat instruments. */
 const EPS = 1e-9;
 
+/**
+ * The close to do arithmetic on.
+ *
+ * Always the adjusted one where the provider supplies it. A 4-for-1 split
+ * is a -75% raw return: it would inflate the volatility estimate for a full
+ * year, and every sigma computed against that estimate would be wrong. The
+ * raw close is for showing to people, not for statistics.
+ */
+export function adjusted(bar: Bar): number {
+  const a = bar.adjClose;
+  return typeof a === 'number' && Number.isFinite(a) && a > 0 ? a : bar.close;
+}
+
 export function mean(xs: readonly number[]): number {
   if (xs.length === 0) return 0;
   let s = 0;
@@ -62,16 +75,25 @@ export function sma(xs: readonly number[], n: number): number {
  */
 export function atrPct(bars: readonly Bar[], n = 14): number {
   if (bars.length < 2) return 0;
+  // Scale each bar's range by its own adjustment factor, so a split does
+  // not register as a single enormous true range.
+  const scale = (b: Bar): number => (b.close > EPS ? adjusted(b) / b.close : 1);
   const trs: number[] = [];
   for (let i = 1; i < bars.length; i++) {
     const b = bars[i] as Bar;
     const p = bars[i - 1] as Bar;
-    trs.push(Math.max(b.high - b.low, Math.abs(b.high - p.close), Math.abs(b.low - p.close)));
+    const sb = scale(b);
+    const high = b.high * sb;
+    const low = b.low * sb;
+    const prevClose = adjusted(p);
+    trs.push(
+      Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)),
+    );
   }
   const window = trs.slice(-Math.min(n, trs.length));
-  const last = bars[bars.length - 1] as Bar;
-  if (last.close <= EPS) return 0;
-  return mean(window) / last.close;
+  const last = adjusted(bars[bars.length - 1] as Bar);
+  if (last <= EPS) return 0;
+  return mean(window) / last;
 }
 
 /**
@@ -190,13 +212,13 @@ export function computeStats(
   marketBars: readonly Bar[],
   now: number,
 ): InstrumentStats {
-  const closes = bars.map((b) => b.close);
+  const closes = bars.map(adjusted);
   const rets = logReturns(closes);
   const last = closes[closes.length - 1] ?? 0;
 
   // Align asset and market returns on timestamp so a symbol that listed
   // mid-history, or that has missing sessions, does not get a nonsense beta.
-  const marketByTs = new Map(marketBars.map((b) => [b.ts, b.close]));
+  const marketByTs = new Map(marketBars.map((b) => [b.ts, adjusted(b)]));
   const pairedAsset: number[] = [];
   const pairedMarket: number[] = [];
   for (let i = 1; i < bars.length; i++) {
@@ -205,8 +227,8 @@ export function computeStats(
     const mCur = marketByTs.get(cur.ts);
     const mPrev = marketByTs.get(prev.ts);
     if (mCur === undefined || mPrev === undefined) continue;
-    if (prev.close <= EPS || mPrev <= EPS) continue;
-    pairedAsset.push(Math.log(cur.close / prev.close));
+    if (adjusted(prev) <= EPS || mPrev <= EPS) continue;
+    pairedAsset.push(Math.log(adjusted(cur) / adjusted(prev)));
     pairedMarket.push(Math.log(mCur / mPrev));
   }
 
@@ -217,9 +239,18 @@ export function computeStats(
   const m30 = win(bars, 30);
   const sigma90 = stdev(win(rets, 90));
 
-  const highs52 = y.map((b) => b.high);
-  const lows52 = y.map((b) => b.low);
-  const closes52 = y.map((b) => b.close);
+  /*
+   * Ranges come from the adjusted series too.
+   *
+   * A 52-week high in pre-split money is not a level today's price can be
+   * compared against - NVDA's raw high of $1,250 would sit permanently
+   * above a post-split $130 and the range-break detector would never fire
+   * again. High and low are scaled by the same factor as the close.
+   */
+  const scale = (b: Bar): number => (b.close > EPS ? adjusted(b) / b.close : 1);
+  const highs52 = y.map((b) => b.high * scale(b));
+  const lows52 = y.map((b) => b.low * scale(b));
+  const closes52 = y.map(adjusted);
 
   return {
     symbol,
@@ -234,8 +265,8 @@ export function computeStats(
     residSigma: residSigma > EPS ? residSigma : sigma90,
     hi52w: highs52.length ? Math.max(...highs52) : last,
     lo52w: lows52.length ? Math.min(...lows52) : last,
-    hi30d: m30.length ? Math.max(...m30.map((b) => b.high)) : last,
-    lo30d: m30.length ? Math.min(...m30.map((b) => b.low)) : last,
+    hi30d: m30.length ? Math.max(...m30.map((b) => b.high * scale(b))) : last,
+    lo30d: m30.length ? Math.min(...m30.map((b) => b.low * scale(b))) : last,
     medVol20: median(win(bars, 20).map((b) => b.volume)),
     sma20: sma(closes, 20),
     sma50: sma(closes, 50),

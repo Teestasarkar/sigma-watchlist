@@ -430,6 +430,9 @@ export class SyntheticProvider implements MarketDataProvider {
         high: mid * (1 + spread),
         low: midLow * (1 - spread),
         close,
+        // The simulator models no corporate actions, so the raw and adjusted
+        // series are identical by construction.
+        adjClose: close,
         volume: this.volumeAtSession(sym, i),
         source: this.sourceLabel,
       });

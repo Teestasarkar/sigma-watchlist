@@ -36,6 +36,10 @@ import type { DigestGroup, ScoredSignal, Signal, SignalKind, WatchlistItem } fro
  */
 export const KIND_WEIGHT: Record<SignalKind, number> = {
   idio_move: 1.0,
+  // High, because it is the one price change that is *not* news and that a
+  // naive watchlist reports as a catastrophe. Telling someone their apparent
+  // 90% drop was a 10-for-1 split is urgent.
+  corporate_action: 0.9,
   sigma_move: 0.85,
   gap: 0.8,
   data_conflict: 0.75,
