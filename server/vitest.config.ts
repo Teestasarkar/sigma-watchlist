@@ -16,11 +16,15 @@ export default defineConfig({
      * suites failing to *load* and forty tests skipped, rather than as
      * anything resembling a test failure.
      *
-     * Four is comfortably faster than serial and survives a two-core CI
-     * runner. Correctness of the suite should not depend on how much else the
-     * machine happens to be doing.
+     * Two, because the memory is the constraint and it compounds from both
+     * ends: each fork can hold a PGlite instance *and* two in-flight scrypt
+     * hashes at the OWASP cost (64MB each, by design - see infra/password.ts).
+     * At four forks that is eight concurrent hashes plus four WASM databases,
+     * which on an ordinary laptop starts swapping and surfaces as unrelated
+     * suites timing out. Correctness of the suite should not depend on how
+     * much else the machine happens to be doing.
      */
-    poolOptions: { forks: { maxForks: 4, minForks: 1 } },
+    poolOptions: { forks: { maxForks: 2, minForks: 1 } },
     /*
      * Generous, because the password tests are *meant* to be slow.
      *

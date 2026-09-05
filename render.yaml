@@ -63,6 +63,15 @@ services:
       - key: INGEST_BATCH
         value: "6"
       - key: INGEST_WARM_MS
-        value: "45000"
+        value: "30000"
+      # Must exceed the warm interval, with margin.
+      #
+      # "Fresh" has to mean "as current as this system can be", not "younger
+      # than an arbitrary constant". With a 30s poll and a 30s threshold, a
+      # perfectly healthy price is labelled Delayed for the second half of
+      # every cycle - the strip flickers, and the product cries wolf about
+      # itself. Nothing is wrong at 45 seconds old when we poll every 30.
+      - key: FRESH_MS
+        value: "90000"
       - key: INGEST_COLD_MS
         value: "300000"

@@ -314,8 +314,10 @@ describe('an open stream', () => {
     expect(took).toBeLessThan(30_000);
     // And the client was told why, rather than just seeing the socket vanish.
     // The final chunk can still be in flight when close() returns, so wait for
-    // it rather than reading the buffer at whatever instant we got here.
-    await stream.waitFor('event: bye');
+    // it rather than reading the buffer at whatever instant we got here. The
+    // wait is generous on purpose: this asserts the frame *arrives*, and a
+    // tight bound would only measure how loaded the machine is.
+    await stream.waitFor('event: bye', 20_000);
 
     stream.close();
     await solo.shutdown();

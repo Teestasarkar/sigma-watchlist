@@ -114,7 +114,19 @@ export const config = {
 
   freshness: {
     /** Quote younger than this = fresh. */
-    freshMs: num(process.env.FRESH_MS, 30_000),
+    /**
+     * Younger than this = fresh.
+     *
+     * **This is coupled to the poll interval and must stay above it.** The
+     * threshold is not an absolute standard of recency; it is the boundary
+     * between "as current as this system can be" and "we have fallen behind".
+     * Set it below `INGEST_WARM_MS` and every healthy price is labelled
+     * Delayed for the back half of each cycle - the health strip flickers and
+     * the product cries wolf about itself, which is the one failure it exists
+     * to avoid. The default here sits above the default warm interval; if you
+     * raise one, raise the other.
+     */
+    freshMs: num(process.env.FRESH_MS, 90_000),
     /** Younger than this = delayed (usable, flagged). Beyond = stale. */
     delayedMs: num(process.env.DELAYED_MS, 5 * 60_000),
     /** Beyond this we stop trusting it entirely and say so loudly. */

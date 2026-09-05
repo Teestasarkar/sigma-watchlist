@@ -10,6 +10,8 @@ import { describe, expect, it } from 'vitest';
 
 import { exchangeClock, SimulatedMarketClock } from '../src/domain/marketClock.js';
 import { isTradingDay, marketPhase, sessionCloseTs } from '../src/domain/calendar.js';
+import { config as baseConfig } from '../src/config.js';
+import { classifyFreshness } from '../src/providers/reconcile.js';
 
 const DAY = 86_400_000;
 
@@ -210,5 +212,44 @@ describe('simulated clock construction', () => {
     for (const i of [0, 1, 259, 260, 1_000]) {
       expect(clock.sessionIndexOf(clock.sessionStartAt(i))).toBe(i);
     }
+  });
+});
+
+/**
+ * Freshness thresholds must be reachable.
+ *
+ * A "fresh" window narrower than the poll interval is not a strict standard,
+ * it is an unreachable one: every perfectly healthy price is labelled Delayed
+ * for the back half of each cycle, the health strip flickers between Live and
+ * Delayed, and the product ends up crying wolf about itself - which is the
+ * exact failure it exists to prevent. This pins the relationship so raising
+ * one without the other fails here rather than in front of a user.
+ */
+describe('the freshness ladder is reachable at the configured poll rate', () => {
+  it('calls a price fresh when it is one poll old', () => {
+    const { freshness, ingest } = baseConfig;
+
+    // The hot and warm tiers are what a watched symbol actually gets.
+    expect(freshness.freshMs).toBeGreaterThan(ingest.warmIntervalMs);
+    expect(freshness.freshMs).toBeGreaterThan(ingest.hotIntervalMs);
+
+    // A quote taken one warm cycle ago, plus a little jitter, is as current as
+    // this system can be - so it must classify as fresh, not delayed.
+    const now = Date.now();
+    const oneCycleOld = now - (ingest.warmIntervalMs + 5_000);
+    expect(classifyFreshness(oneCycleOld, now, freshness)).toBe('fresh');
+  });
+
+  it('still keeps the ladder ordered', () => {
+    const { freshness } = baseConfig;
+    expect(freshness.freshMs).toBeLessThan(freshness.delayedMs);
+    expect(freshness.delayedMs).toBeLessThan(freshness.staleMs);
+  });
+
+  it('does eventually say delayed', () => {
+    // The threshold must be generous, not absent.
+    const { freshness } = baseConfig;
+    const now = Date.now();
+    expect(classifyFreshness(now - (freshness.freshMs + 1_000), now, freshness)).toBe('delayed');
   });
 });
